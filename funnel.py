@@ -8,7 +8,7 @@ import numpy as np
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestRegressor
 
-# Cấu hình trang Streamlit
+# Cấu hình trang Streamlit (đảm bảo lệnh này nằm ở đầu file)
 st.set_page_config(layout="wide", page_title="Phân Tích Funnel")
 
 # CSS tùy chỉnh giao diện
@@ -52,7 +52,6 @@ def load_data(file):
         return None
 
 # ------------------- Hàm lọc dữ liệu ------------------- #
-
 def apply_filters(df, filters):
     filtered_df = df.copy()
     
@@ -90,18 +89,35 @@ def show_filters(df):
         df["Ngành hàng"].fillna("Unknown", inplace=True)
     
     filters = {
-        "Tên khách hàng": st.sidebar.multiselect("Tên khách hàng:", options=sorted(df["Tên khách hàng"].unique())),
-        "Giai đoạn": st.sidebar.multiselect("Giai đoạn:", options=sorted(df["Giai đoạn"].unique())),
-        "Tỉ lệ thắng": st.sidebar.multiselect("Tỉ lệ thắng:", options=sorted(df["Tỉ lệ thắng"].unique())),
-        "Tỉnh/TP": st.sidebar.multiselect("Tỉnh/TP:", options=sorted(df["Tỉnh/TP"].astype(str).unique())),
-        "Nhóm khách hàng theo chính sách công nợ": st.sidebar.multiselect("Nhóm khách hàng theo chính sách công nợ:", options=sorted(df["Nhóm khách hàng theo chính sách công nợ"].unique())),
-        "Ngành hàng": st.sidebar.multiselect("Ngành hàng:", options=sorted(df["Ngành hàng"].unique())),
+        "Tên khách hàng": st.sidebar.multiselect(
+            "Tên khách hàng:", 
+            options=sorted(df["Tên khách hàng"].unique())
+        ),
+        "Giai đoạn": st.sidebar.multiselect(
+            "Giai đoạn:", 
+            options=sorted(df["Giai đoạn"].unique())
+        ),
+        "Tỉ lệ thắng": st.sidebar.multiselect(
+            "Tỉ lệ thắng:", 
+            options=sorted(df["Tỉ lệ thắng"].unique())
+        ),
+        "Tỉnh/TP": st.sidebar.multiselect(
+            "Tỉnh/TP:", 
+            options=sorted(df["Tỉnh/TP"].astype(str).unique())
+        ),
+        "Nhóm khách hàng theo chính sách công nợ": st.sidebar.multiselect(
+            "Nhóm khách hàng theo chính sách công nợ:", 
+            options=sorted(df["Nhóm khách hàng theo chính sách công nợ"].unique())
+        ),
+        "Ngành hàng": st.sidebar.multiselect(
+            "Ngành hàng:", 
+            options=sorted(df["Ngành hàng"].unique())
+        ),
     }
     
     return apply_filters(df, filters)
 
 # ------------------- Hàm hiển thị trang bìa ------------------- #
-
 def show_cover_page():
     st.title("Phân Tích Funnel")
     st.write("""
@@ -113,16 +129,16 @@ def show_cover_page():
     """)
     st.image("https://github.com/user-attachments/assets/f263bd14-23a4-4735-b082-1d10ade1bbb0", use_column_width=True)
 
-# ------------------- Hàm main ------------------- #
+# ------------------- Hàm tính toán các chỉ số ------------------- #
 
-# Tính các chỉ số phân tích mô tả
+# I. Chỉ số phân tích mô tả
 def calculate_descriptive_metrics(df):
     metrics = {}
     
     # 1. Tổng số cơ hội
     metrics['total_opportunities'] = len(df)
     
-    # 2. Phân bố theo giai đoạn
+    # 2. Phân bố theo giai đoạn (tính phần trăm)
     stage_dist = df['Giai đoạn'].value_counts(normalize=True) * 100
     metrics['stage_distribution'] = stage_dist
     
@@ -138,30 +154,43 @@ def calculate_descriptive_metrics(df):
     # 6. Độ lệch chuẩn của doanh thu dự kiến
     metrics['std_expected_revenue'] = df['Doanh thu dự kiến'].std()
     
-    # 7. Tỉ lệ thắng trung bình
+    # 7. Tỉ lệ thắng trung bình (chuyển đổi cột nếu cần)
     df['Tỉ lệ thắng'] = pd.to_numeric(df['Tỉ lệ thắng'], errors='coerce')
     metrics['avg_win_rate'] = df['Tỉ lệ thắng'].mean()
     
     # 8. Thời gian trung bình từ tạo đến ký HĐ
-    df['time_to_sign'] = (df['Ngày dự kiến kí HĐ'] - df['Thời điểm tạo']).dt.days
+    # Nếu chưa tồn tại cột "time_to_sign", tính toán từ 2 cột ngày
+    if "time_to_sign" not in df.columns:
+        df['time_to_sign'] = (df['Ngày dự kiến kí HĐ'] - df['Thời điểm tạo']).dt.days
     metrics['avg_time_to_sign'] = df['time_to_sign'].mean()
     
     return metrics
 
-# Tính các chỉ số phân tích dự đoán
+# II. Chỉ số phân tích dự đoán
 def calculate_predictive_metrics(df):
-    # Chuẩn bị dữ liệu cho mô hình
-    le = LabelEncoder()
+    # Tạo một bản sao để không làm thay đổi dữ liệu gốc
     df_model = df.copy()
     
-    # Mã hóa các biến categorical
-    categorical_cols = ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 'Nhân viên kinh doanh']
-    for col in categorical_cols:
-        df_model[col] = le.fit_transform(df_model[col])
+    # Nếu chưa có cột time_to_sign, tính toán nó
+    if "time_to_sign" not in df_model.columns:
+        df_model["time_to_sign"] = (df_model["Ngày dự kiến kí HĐ"] - df_model["Thời điểm tạo"]).dt.days
+
+    # Danh sách các cột categorical cần mã hóa. Kiểm tra sự tồn tại của từng cột.
+    categorical_cols = []
+    for col in ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 'Nhân viên kinh doanh']:
+        if col in df_model.columns:
+            categorical_cols.append(col)
     
-    # Feature importance
-    X = df_model[categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng']]
-    y = df_model['time_to_sign']
+    le = LabelEncoder()
+    for col in categorical_cols:
+        # Ép dữ liệu về chuỗi để đảm bảo không lỗi
+        df_model[col] = le.fit_transform(df_model[col].astype(str))
+    
+    # Chọn các tính năng (features)
+    # Nếu "Tỉ lệ thắng" chưa ở dạng numeric, hãy đảm bảo nó đã được chuyển đổi
+    X_cols = categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng']
+    X = df_model[X_cols].fillna(0)
+    y = df_model["time_to_sign"].fillna(0)
     
     rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
     rf_model.fit(X, y)
@@ -173,21 +202,24 @@ def calculate_predictive_metrics(df):
     
     return feature_importance
 
-# Tính các chỉ số phân tích chuẩn đoán
+# III. Chỉ số phân tích chuẩn đoán
 def calculate_diagnostic_metrics(df):
-    # Ma trận tương quan
+    # Ma trận tương quan giữa các cột số
     numeric_cols = ['Doanh thu dự kiến', 'Tỉ lệ thắng', 'time_to_sign']
     corr_matrix = df[numeric_cols].corr()
     
-    # Phân tích hiệu suất nhân viên
-    sales_performance = df.groupby('Nhân viên kinh doanh').agg({
-        'Doanh thu dự kiến': ['count', 'mean', 'sum'],
-        'Tỉ lệ thắng': 'mean'
-    }).round(2)
+    # Phân tích hiệu suất nhân viên kinh doanh (nếu cột này tồn tại)
+    if "Nhân viên kinh doanh" in df.columns:
+        sales_performance = df.groupby("Nhân viên kinh doanh").agg({
+            'Doanh thu dự kiến': ['count', 'mean', 'sum'],
+            'Tỉ lệ thắng': 'mean'
+        }).round(2)
+    else:
+        sales_performance = None
     
     return corr_matrix, sales_performance
 
-# Hàm main chính
+# ------------------- Hàm main ------------------- #
 def main():
     st.title('🎯 Hệ Thống Phân Tích Funnel Nâng Cao')
     
@@ -206,18 +238,16 @@ def main():
             # Áp dụng bộ lọc dữ liệu
             filtered_df = show_filters(df)
             
-            # Đảm bảo các cột tài chính là số
+            # Đảm bảo cột "Doanh thu dự kiến" là số
             filtered_df['Doanh thu dự kiến'] = pd.to_numeric(filtered_df['Doanh thu dự kiến'], errors='coerce').fillna(0)
             
             # Tính toán các chỉ số
             desc_metrics = calculate_descriptive_metrics(filtered_df)
             feature_importance = calculate_predictive_metrics(filtered_df)
             corr_matrix, sales_performance = calculate_diagnostic_metrics(filtered_df)
-
-            # Hiển thị dashboard
+            
+            # Hiển thị Dashboard
             st.header("1. Chỉ số Phân tích Mô tả")
-
-            # Metrics trong 3 cột
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric("Tổng số cơ hội", f"{desc_metrics['total_opportunities']:,}")
@@ -225,8 +255,7 @@ def main():
                 st.metric("Tổng doanh thu dự kiến", f"{desc_metrics['total_expected_revenue']:,.0f} VND")
             with col3:
                 st.metric("Tỉ lệ thắng trung bình", f"{desc_metrics['avg_win_rate']:.1f}%")
-
-            # Thêm các metrics khác
+            
             col4, col5, col6 = st.columns(3)
             with col4:
                 st.metric("Doanh thu trung bình", f"{desc_metrics['avg_expected_revenue']:,.0f} VND")
@@ -234,40 +263,32 @@ def main():
                 st.metric("Doanh thu trung vị", f"{desc_metrics['median_expected_revenue']:,.0f} VND")
             with col6:
                 st.metric("Thời gian trung bình đến ký HĐ", f"{desc_metrics['avg_time_to_sign']:.1f} ngày")
-
-            # Biểu đồ phân tích
+            
             st.subheader("Phân bố doanh thu theo giai đoạn")
             fig1 = px.box(filtered_df, x="Giai đoạn", y="Doanh thu dự kiến",
                           title="Phân bố doanh thu dự kiến theo giai đoạn")
             st.plotly_chart(fig1, use_container_width=True)
-
-            # Phân tích dự đoán
+            
             st.header("2. Chỉ số Phân tích Dự đoán")
-
-            # Feature importance
             st.subheader("Tầm quan trọng của các yếu tố")
             fig2 = px.bar(feature_importance, x='importance', y='feature', orientation='h',
-                          title="Feature Importance trong dự đoán thời gian ký hợp đồng")
+                          title="Feature Importance trong dự đoán thời gian ký HĐ")
             st.plotly_chart(fig2, use_container_width=True)
-
-            # Phân tích chuẩn đoán
+            
             st.header("3. Chỉ số Phân tích Chuẩn đoán")
-
-            # Ma trận tương quan
             st.subheader("Ma trận tương quan")
             fig3 = px.imshow(corr_matrix, 
                              labels=dict(color="Correlation"),
                              title="Ma trận tương quan giữa các biến số")
             st.plotly_chart(fig3, use_container_width=True)
-
-            # Hiệu suất nhân viên
+            
             st.subheader("Phân tích hiệu suất nhân viên kinh doanh")
-            st.dataframe(sales_performance)
-
-            # Thêm tính năng phân tích theo thời gian
+            if sales_performance is not None:
+                st.dataframe(sales_performance)
+            else:
+                st.info("Không có dữ liệu cho phân tích nhân viên kinh doanh.")
+            
             st.header("4. Phân tích theo thời gian")
-
-            # Timeline của các cơ hội
             fig4 = px.timeline(
                 filtered_df,
                 x_start="Thời điểm tạo",
@@ -276,8 +297,7 @@ def main():
                 title="Timeline các cơ hội"
             )
             st.plotly_chart(fig4, use_container_width=True)
-
-            # Dữ liệu chi tiết
+            
             st.header("5. Dữ liệu chi tiết")
             st.dataframe(
                 filtered_df.style.format({
@@ -285,8 +305,7 @@ def main():
                     "Tỉ lệ thắng": "{:.1f}%"
                 })
             )
-
-            # Download button
+            
             csv = filtered_df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 "Tải dữ liệu",
@@ -297,6 +316,6 @@ def main():
             )
         else:
             st.info("Vui lòng tải lên file dữ liệu để bắt đầu phân tích.")
-
+            
 if __name__ == '__main__':
     main()
