@@ -220,6 +220,9 @@ def calculate_predictive_metrics(df):
     for col in categorical_cols:
         df_model[col] = le.fit_transform(df_model[col])
     
+    # Ensure there are no NaNs or infinite values
+    df_model = df_model.replace([np.inf, -np.inf], np.nan).dropna()
+
     # Feature importance
     X = df_model[categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng']]
     y = df_model['time_to_sign']
@@ -234,24 +237,24 @@ def calculate_predictive_metrics(df):
     
     # Dự đoán khả năng thành công của cơ hội
     logistic_model = LogisticRegression()
-    logistic_model.fit(X, (df['Giai đoạn'] == '90% - Thực hiện hợp đồng').astype(int))
+    logistic_model.fit(X, (df_model['Giai đoạn'] == le.transform(['90% - Thực hiện hợp đồng'])[0]).astype(int))
     success_prob = logistic_model.predict_proba(X)[:, 1]
-    df['success_prob'] = success_prob
+    df_model['success_prob'] = success_prob
     
     # Dự đoán doanh thu thực tế
     revenue_model = RandomForestRegressor(n_estimators=100, random_state=42)
-    revenue_model.fit(X, df['Doanh thu dự kiến'])
-    df['predicted_revenue'] = revenue_model.predict(X)
+    revenue_model.fit(X, df_model['Doanh thu dự kiến'])
+    df_model['predicted_revenue'] = revenue_model.predict(X)
     
     # Phân loại cơ hội theo mức độ rủi ro
     kmeans = KMeans(n_clusters=3, random_state=42)
-    df['risk_level'] = kmeans.fit_predict(X)
+    df_model['risk_level'] = kmeans.fit_predict(X)
     
     # Dự báo xu hướng doanh thu theo thời gian
-    df['Thời điểm tạo'] = pd.to_datetime(df['Thời điểm tạo'], errors='coerce')
-    time_series_data = df.set_index('Thời điểm tạo').resample('M')['Doanh thu dự kiến'].sum()
+    df_model['Thời điểm tạo'] = pd.to_datetime(df_model['Thời điểm tạo'], errors='coerce')
+    time_series_data = df_model.set_index('Thời điểm tạo').resample('M')['Doanh thu dự kiến'].sum()
     
-    return feature_importance, df, time_series_data
+    return feature_importance, df_model, time_series_data
 
 # Tính các chỉ số phân tích chuẩn đoán
 def calculate_diagnostic_metrics(df):
@@ -379,13 +382,6 @@ def main():
             st.dataframe(
                 filtered_df.style.format({
                     "Doanh thu dự kiến": "{:,.0f}",
-                    "Tỉ lệ thắng": "{:.1f}%"
-                })
-            )
-
-            # Download button
-            csv = filtered_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
                 "Tải dữ liệu",
                 csv,
                 "data.csv",
