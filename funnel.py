@@ -211,7 +211,6 @@ def calculate_descriptive_metrics(df):
 
 # Tính các chỉ số phân tích dự đoán
 def calculate_predictive_metrics(df):
-    # Chuẩn bị dữ liệu cho mô hình
     df_model = df.copy()
     
     try:
@@ -257,29 +256,29 @@ def calculate_predictive_metrics(df):
         rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
         rf_model.fit(X, y)
     
-    feature_importance = pd.DataFrame({
-        'feature': X.columns,
-        'importance': rf_model.feature_importances_
-    }).sort_values('importance', ascending=False)
-    
-    # Dự đoán khả năng thành công của cơ hội
-    logistic_model = LogisticRegression()
-    logistic_model.fit(X, (df_model['Giai đoạn'] == le.transform(['90% - Thực hiện hợp đồng'])[0]).astype(int))
-    success_prob = logistic_model.predict_proba(X)[:, 1]
-    df_model['success_prob'] = success_prob
-    
-    # Dự đoán doanh thu thực tế
-    revenue_model = RandomForestRegressor(n_estimators=100, random_state=42)
-    revenue_model.fit(X, df_model['Doanh thu dự kiến'])
-    df_model['predicted_revenue'] = revenue_model.predict(X)
-    
-    # Phân loại cơ hội theo mức độ rủi ro
-    kmeans = KMeans(n_clusters=3, random_state=42)
-    df_model['risk_level'] = kmeans.fit_predict(X)
-    
-    # Dự báo xu hướng doanh thu theo thời gian
-    df_model['Thời điểm tạo'] = pd.to_datetime(df_model['Thời điểm tạo'], errors='coerce')
-    time_series_data = df_model.set_index('Thời điểm tạo').resample('M')['Doanh thu dự kiến'].sum()
+        feature_importance = pd.DataFrame({
+            'feature': X.columns,
+            'importance': rf_model.feature_importances_
+        }).sort_values('importance', ascending=False)
+        
+        # Dự đoán khả năng thành công của cơ hội
+        logistic_model = LogisticRegression()
+        logistic_model.fit(X, (df_model['Giai đoạn'] == le.transform(['90% - Thực hiện hợp đồng'])[0]).astype(int))
+        success_prob = logistic_model.predict_proba(X)[:, 1]
+        df_model['success_prob'] = success_prob
+        
+        # Dự đoán doanh thu thực tế
+        revenue_model = RandomForestRegressor(n_estimators=100, random_state=42)
+        revenue_model.fit(X, df_model['Doanh thu dự kiến'])
+        df_model['predicted_revenue'] = revenue_model.predict(X)
+        
+        # Phân loại cơ hội theo mức độ rủi ro
+        kmeans = KMeans(n_clusters=3, random_state=42)
+        df_model['risk_level'] = kmeans.fit_predict(X)
+        
+        # Dự báo xu hướng doanh thu theo thời gian
+        df_model['Thời điểm tạo'] = pd.to_datetime(df_model['Thời điểm tạo'], errors='coerce')
+        time_series_data = df_model.set_index('Thời điểm tạo').resample('M')['Doanh thu dự kiến'].sum()
     
     except Exception as e:
         st.error(f"Lỗi phân tích dự đoán: {str(e)}")
