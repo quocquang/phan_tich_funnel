@@ -91,7 +91,7 @@ def show_basic_metrics(df):
         # Chuyển đổi 'Doanh thu dự kiến' sang kiểu số
         df['Doanh thu dự kiến'] = pd.to_numeric(df['Doanh thu dự kiến'], errors='coerce')
         
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
             total_opportunities = len(df)
@@ -104,18 +104,6 @@ def show_basic_metrics(df):
         with col3:
             avg_revenue = df['Doanh thu dự kiến'].mean()
             st.metric("Doanh thu trung bình", f"{avg_revenue:,.0f} VND")
-
-        with col4:
-            win_rate = df[df['Trạng thái'] == 'Active']['Tỉ lệ thắng'].mean()
-            st.metric("Tỉ lệ thắng trung bình", f"{win_rate:.1f}%")
-        
-        with col5:
-            active_opportunities = len(df[df['Trạng thái'] == 'Active'])
-            st.metric("Số cơ hội đang hoạt động", f"{active_opportunities:,}")
-        
-        with col6:
-            avg_conversion_time = (df['Ngày dự kiến kí HĐ'] - df['Thời điểm tạo']).mean()
-            st.metric("Thời gian chuyển đổi trung bình", f"{avg_conversion_time.days} ngày")
             
     except Exception as e:
         st.error(f"Lỗi khi tính toán metrics cơ bản: {str(e)}")
@@ -163,6 +151,25 @@ def show_detailed_data(df):
         )
     except Exception as e:
         st.error(f"Lỗi khi hiển thị dữ liệu chi tiết: {str(e)}")
+
+def show_additional_metrics(df):
+    try:
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            win_rate = df[df['Trạng thái'] == 'Active']['Tỉ lệ thắng'].mean()
+            st.metric("Tỉ lệ thắng trung bình", f"{win_rate:.1f}%")
+        
+        with col2:
+            active_opportunities = len(df[df['Trạng thái'] == 'Active'])
+            st.metric("Số cơ hội đang hoạt động", f"{active_opportunities:,}")
+        
+        with col3:
+            avg_conversion_time = (df['Ngày dự kiến kí HĐ'] - df['Thời điểm tạo']).mean()
+            st.metric("Thời gian chuyển đổi trung bình", f"{avg_conversion_time.days} ngày")
+            
+    except Exception as e:
+        st.error(f"Lỗi khi tính toán các metrics bổ sung: {str(e)}")
 
 def show_opportunities_by_customer(df):
     try:
@@ -248,6 +255,21 @@ def show_opportunities_by_competitor(df):
     except Exception as e:
         st.error(f"Lỗi khi tạo biểu đồ số cơ hội theo đối thủ: {str(e)}")
 
+def show_avg_time_by_stage(df):
+    try:
+        if 'Giai đoạn' in df.columns and 'Ngày dự kiến kí HĐ' in df.columns and 'Thời điểm tạo' in df.columns:
+            df['Thời gian xử lý'] = (df['Ngày dự kiến kí HĐ'] - df['Thời điểm tạo']).dt.days
+            avg_time_by_stage = df.groupby('Giai đoạn')['Thời gian xử lý'].mean().reset_index()
+            
+            fig = px.bar(avg_time_by_stage, 
+                         x='Giai đoạn', 
+                         y='Thời gian xử lý',
+                         title="Thời gian xử lý trung bình theo giai đoạn",
+                         labels={'Giai đoạn': 'Giai đoạn', 'Thời gian xử lý': 'Thời gian xử lý (ngày)'})
+            st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Lỗi khi tạo biểu đồ thời gian xử lý trung bình theo giai đoạn: {str(e)}")
+
 def main():
     st.title('🎯 Phân Tích Funnel')
     
@@ -267,6 +289,10 @@ def main():
             # Hiển thị các metrics cơ bản
             st.header("1. Tổng quan")
             show_basic_metrics(filtered_df)
+            
+            # Hiển thị các metrics bổ sung
+            st.header("1.1 Metrics bổ sung")
+            show_additional_metrics(filtered_df)
             
             # Hiển thị biểu đồ phân bố doanh thu
             st.header("2. Phân tích doanh thu")
@@ -296,8 +322,12 @@ def main():
             st.header("8. Số cơ hội theo đối thủ")
             show_opportunities_by_competitor(filtered_df)
             
+            # Hiển thị biểu đồ thời gian xử lý trung bình theo giai đoạn
+            st.header("9. Thời gian xử lý trung bình theo giai đoạn")
+            show_avg_time_by_stage(filtered_df)
+            
             # Hiển thị dữ liệu chi tiết
-            st.header("9. Dữ liệu chi tiết")
+            st.header("10. Dữ liệu chi tiết")
             show_detailed_data(filtered_df)
             
         else:
