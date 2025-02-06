@@ -41,6 +41,10 @@ def load_data(file):
         for col in date_columns:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
+                
+        # Chuyển đổi cột 'Tỉ lệ thắng' từ dạng chuỗi sang số
+        if 'Tỉ lệ thắng' in df.columns:
+            df['Tỉ lệ thắng'] = df['Tỉ lệ thắng'].str.rstrip('%').astype('float') / 100
         
         return df
     except Exception as e:
@@ -195,6 +199,33 @@ def show_revenue_by_region(df):
     except Exception as e:
         st.error(f"Lỗi khi tạo biểu đồ doanh thu theo vùng: {str(e)}")
 
+def show_revenue_by_product(df):
+    try:
+        if 'Ngành hàng' in df.columns and 'Doanh thu dự kiến' in df.columns:
+            revenue_by_product = df.groupby('Ngành hàng')['Doanh thu dự kiến'].sum().reset_index()
+            
+            fig = px.pie(revenue_by_product, 
+                         names='Ngành hàng', 
+                         values='Doanh thu dự kiến',
+                         title="Doanh thu dự kiến theo ngành hàng")
+            st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Lỗi khi tạo biểu đồ doanh thu theo ngành hàng: {str(e)}")
+
+def show_conversion_rate_by_stage(df):
+    try:
+        if 'Giai đoạn' in df.columns:
+            conversion_rate_by_stage = df.groupby('Giai đoạn')['Tỉ lệ thắng'].mean().reset_index()
+            
+            fig = px.bar(conversion_rate_by_stage, 
+                         x='Giai đoạn', 
+                         y='Tỉ lệ thắng',
+                         title="Tỉ lệ chuyển đổi theo giai đoạn",
+                         labels={'Giai đoạn': 'Giai đoạn', 'Tỉ lệ thắng': 'Tỉ lệ thắng'})
+            st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Lỗi khi tạo biểu đồ tỉ lệ chuyển đổi theo giai đoạn: {str(e)}")
+
 def main():
     st.title('🎯 Phân Tích Funnel')
     
@@ -231,8 +262,16 @@ def main():
             st.header("4. Doanh thu theo vùng")
             show_revenue_by_region(filtered_df)
             
+            # Hiển thị biểu đồ doanh thu theo ngành hàng
+            st.header("5. Doanh thu theo ngành hàng")
+            show_revenue_by_product(filtered_df)
+            
+            # Hiển thị biểu đồ tỉ lệ chuyển đổi theo giai đoạn
+            st.header("6. Tỉ lệ chuyển đổi theo giai đoạn")
+            show_conversion_rate_by_stage(filtered_df)
+            
             # Hiển thị dữ liệu chi tiết
-            st.header("5. Dữ liệu chi tiết")
+            st.header("7. Dữ liệu chi tiết")
             show_detailed_data(filtered_df)
             
         else:
