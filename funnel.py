@@ -65,9 +65,6 @@ def apply_filters(df, filters):
     if filters.get("Tỉ lệ thắng"):
         filtered_df = filtered_df[filtered_df["Tỉ lệ thắng"].isin(filters["Tỉ lệ thắng"])]
         
-    if filters.get("Nhân viên kinh doanh"):
-        filtered_df = filtered_df[filtered_df["Nhân viên kinh doanh"].isin(filters["Nhân viên kinh doanh"])]
-        
     if filters.get("Tỉnh/TP"):
         filtered_df = filtered_df[filtered_df["Tỉnh/TP"].isin(filters["Tỉnh/TP"])]
         
@@ -96,7 +93,6 @@ def show_filters(df):
         "Tên khách hàng": st.sidebar.multiselect("Tên khách hàng:", options=sorted(df["Tên khách hàng"].unique())),
         "Giai đoạn": st.sidebar.multiselect("Giai đoạn:", options=sorted(df["Giai đoạn"].unique())),
         "Tỉ lệ thắng": st.sidebar.multiselect("Tỉ lệ thắng:", options=sorted(df["Tỉ lệ thắng"].unique())),
-        "Nhân viên kinh doanh": st.sidebar.multiselect("Nhân viên kinh doanh:", options=sorted(df["Nhân viên kinh doanh"].unique())),
         "Tỉnh/TP": st.sidebar.multiselect("Tỉnh/TP:", options=sorted(df["Tỉnh/TP"].unique())),
         "Nhóm khách hàng theo chính sách công nợ": st.sidebar.multiselect("Nhóm khách hàng theo chính sách công nợ:", options=sorted(df["Nhóm khách hàng theo chính sách công nợ"].unique())),
         "Ngành hàng": st.sidebar.multiselect("Ngành hàng:", options=sorted(df["Ngành hàng"].unique())),
