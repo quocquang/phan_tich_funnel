@@ -68,6 +68,12 @@ def show_filters(df):
             "Giai đoạn:",
             options=sorted(df["Giai đoạn"].dropna().unique())
         )
+        
+    if "Tỉ lệ thắng" in df.columns:
+        filters["Tỉ lệ thắng"] = st.sidebar.multiselect(
+            "Tỉ lệ thắng:",
+            options=sorted(df["Tỉ lệ thắng"].dropna().unique())
+        )
     
     if "Tỉnh/TP" in df.columns:
         filters["Tỉnh/TP"] = st.sidebar.multiselect(
@@ -278,7 +284,7 @@ def show_win_rate_by_sales_team(df):
             fig = px.bar(win_rate_by_sales_team, 
                          x='Tên khách hàng', 
                          y='Tỉ lệ thắng',
-                         title="Tỉ lệ thắng theo đội ngũ bán hàng",
+                         title="Tỉ lệ thắng theo Tên khách hàng",
                          labels={'Tên khách hàng': 'Tên khách hàng', 'Tỉ lệ thắng': 'Tỉ lệ thắng'})
             st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
