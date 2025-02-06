@@ -288,19 +288,15 @@ def main():
         if df is not None:
             # Áp dụng bộ lọc dữ liệu
             filtered_df = show_filters(df)
-            
-            # Đảm bảo các cột tài chính là số
             filtered_df['Doanh thu dự kiến'] = pd.to_numeric(filtered_df['Doanh thu dự kiến'], errors='coerce').fillna(0)
             
             # Tính toán các chỉ số
             desc_metrics = calculate_descriptive_metrics(filtered_df)
             feature_importance, df_with_predictions, time_series_data = calculate_predictive_metrics(filtered_df)
             corr_matrix, sales_performance = calculate_diagnostic_metrics(filtered_df)
-
-            # Hiển thị dashboard
+            
+            # 1. Chỉ số Phân tích Mô tả
             st.header("1. Chỉ số Phân tích Mô tả")
-
-            # Metrics trong 3 cột
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric("Tổng số cơ hội", f"{desc_metrics['total_opportunities']:,}")
@@ -308,8 +304,7 @@ def main():
                 st.metric("Tổng doanh thu dự kiến", f"{desc_metrics['total_expected_revenue']:,.0f} VND")
             with col3:
                 st.metric("Tỉ lệ thắng trung bình", f"{desc_metrics['avg_win_rate']:.1f}%")
-
-            # Thêm các metrics khác
+            
             col4, col5, col6 = st.columns(3)
             with col4:
                 st.metric("Doanh thu trung bình", f"{desc_metrics['avg_expected_revenue']:,.0f} VND")
@@ -317,57 +312,47 @@ def main():
                 st.metric("Doanh thu trung vị", f"{desc_metrics['median_expected_revenue']:,.0f} VND")
             with col6:
                 st.metric("Thời gian trung bình đến ký HĐ", f"{desc_metrics['avg_time_to_sign']:.1f} ngày")
-
-            # Biểu đồ phân tích
+            
             st.subheader("Phân bố doanh thu theo giai đoạn")
             fig1 = px.box(filtered_df, x="Giai đoạn", y="Doanh thu dự kiến",
                           title="Phân bố doanh thu dự kiến theo giai đoạn")
             st.plotly_chart(fig1, use_container_width=True)
-
-            # Phân tích dự đoán
+            
+            # 2. Chỉ số Phân tích Dự đoán
             st.header("2. Chỉ số Phân tích Dự đoán")
-
-            # Feature importance
+            
             st.subheader("Tầm quan trọng của các yếu tố")
             fig2 = px.bar(feature_importance, x='importance', y='feature', orientation='h',
-                          title="Feature Importance trong dự đoán thời gian ký hợp đồng")
+                          title="Feature Importance trong dự đoán thời gian ký HĐ")
             st.plotly_chart(fig2, use_container_width=True)
-
-            # Dự đoán khả năng thành công của cơ hội
+            
             st.subheader("Dự đoán khả năng thành công của cơ hội")
             st.dataframe(df_with_predictions[['Tên cơ hội', 'success_prob']])
-
-            # Dự đoán doanh thu thực tế
+            
             st.subheader("Dự đoán doanh thu thực tế")
             st.dataframe(df_with_predictions[['Tên cơ hội', 'predicted_revenue']])
-
-            # Phân loại cơ hội theo mức độ rủi ro
+            
             st.subheader("Phân loại cơ hội theo mức độ rủi ro")
             st.dataframe(df_with_predictions[['Tên cơ hội', 'risk_level']])
-
-            # Dự báo xu hướng doanh thu theo thời gian
+            
             st.subheader("Dự báo xu hướng doanh thu theo thời gian")
             fig3 = px.line(time_series_data, title="Dự báo xu hướng doanh thu theo thời gian")
             st.plotly_chart(fig3, use_container_width=True)
-
-            # Phân tích chuẩn đoán
+            
+            # 3. Chỉ số Phân tích Chuẩn đoán
             st.header("3. Chỉ số Phân tích Chuẩn đoán")
-
-            # Ma trận tương quan
+            
             st.subheader("Ma trận tương quan")
             fig4 = px.imshow(corr_matrix, 
                              labels=dict(color="Correlation"),
                              title="Ma trận tương quan giữa các biến số")
             st.plotly_chart(fig4, use_container_width=True)
-
-            # Hiệu suất nhân viên
+            
             st.subheader("Phân tích hiệu suất nhân viên kinh doanh")
             st.dataframe(sales_performance)
-
-            # Thêm tính năng phân tích theo thời gian
+            
+            # 4. Phân tích theo thời gian
             st.header("4. Phân tích theo thời gian")
-
-            # Timeline của các cơ hội
             fig5 = px.timeline(
                 filtered_df,
                 x_start="Thời điểm tạo",
@@ -376,26 +361,30 @@ def main():
                 title="Timeline các cơ hội"
             )
             st.plotly_chart(fig5, use_container_width=True)
-
-            # Dữ liệu chi tiết
+            
+            # 5. Dữ liệu chi tiết
             st.header("5. Dữ liệu chi tiết")
             st.dataframe(
-            filtered_df.style.format({
+                filtered_df.style.format({
                     "Doanh thu dự kiến": "{:,.0f}",
                     "Tỉ lệ thắng": "{:.1f}%"
-    })
-)
+                })
+            )
+            
+            # Download button
+            csv = filtered_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                "Tải dữ liệu",
+                csv,
+                "data.csv",
+                "text/csv",
+                key='download-csv'
+            )
+            
+        else:
+            st.info("Vui lòng tải lên file dữ liệu để bắt đầu phân tích.")
+    else:
+        st.info("Vui lòng tải lên file dữ liệu để bắt đầu phân tích.")
 
-# Download button
-        csv = filtered_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-        "Tải dữ liệu",
-    csv,
-    "data.csv",
-    "text/csv",
-    key='download-csv'
-)
-else:
-    st.info("Vui lòng tải lên file dữ liệu để bắt đầu phân tích.")
 if __name__ == '__main__':
     main()
