@@ -213,86 +213,88 @@ def calculate_predictive_metrics(df):
     # Chuẩn bị dữ liệu cho mô hình
     df_model = df.copy()
     
+    # Kiểm tra dữ liệu đầu vào
+    if df_model.empty:
+        raise ValueError("Dataframe rỗng, không thể thực hiện phân tích dự đoán")
+        
+    # Các cột bắt buộc
+    required_cols = ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 
+                     'Nhân viên kinh doanh', 'Doanh thu dự kiến', 
+                     'Tỉ lệ thắng', 'Ngày dự kiến kí HĐ', 'Thời điểm tạo']
+    missing_cols = [col for col in required_cols if col not in df_model.columns]
+    if missing_cols:
+        raise KeyError(f"Thiếu các cột quan trọng: {', '.join(missing_cols)}")
+    
+    # Xử lý dữ liệu
+    # Tính toán time_to_sign nếu chưa có
+    if "time_to_sign" not in df_model.columns:
+        df_model["time_to_sign"] = (df_model["Ngày dự kiến kí HĐ"] - df_model["Thời điểm tạo"]).dt.days
+    
+    # Loại bỏ những dòng có time_to_sign không hợp lệ (ví dụ: <= 0)
+    df_model = df_model[df_model["time_to_sign"] > 0]
+    
+    # Chuyển đổi các cột số về kiểu numeric
+    df_model['Doanh thu dự kiến'] = pd.to_numeric(df_model['Doanh thu dự kiến'], errors='coerce')
+    df_model['Tỉ lệ thắng'] = pd.to_numeric(df_model['Tỉ lệ thắng'].str.replace('%', ''), errors='coerce')
+    
+    # Mã hóa các biến categorical
+    categorical_cols = ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 'Nhân viên kinh doanh']
+    le = LabelEncoder()
+    for col in categorical_cols:
+        # Ép dữ liệu về chuỗi để đảm bảo không lỗi
+        df_model[col] = le.fit_transform(df_model[col].astype(str))
+    
+    # Chuẩn bị tập tính năng và mục tiêu
+    X = df_model[categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng']]
+    y = df_model['time_to_sign'].values  # ép y thành mảng NumPy
+    
+    # Xử lý giá trị thiếu bằng SimpleImputer
+    from sklearn.impute import SimpleImputer
+    imputer = SimpleImputer(strategy='mean')
+    X = imputer.fit_transform(X)
+    
+    # Kiểm tra kích thước của X và y
+    if X.shape[0] != y.shape[0]:
+        raise ValueError(f"Kích thước không khớp: X có {X.shape[0]} mẫu, y có {y.shape[0]} mẫu")
+    
+    # Huấn luyện mô hình RandomForestRegressor để tính feature importance
+    rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
+    rf_model.fit(X, y)
+    
+    feature_importance = pd.DataFrame({
+        'feature': categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng'],
+        'importance': rf_model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    # Dự đoán khả năng thành công của cơ hội bằng Logistic Regression
+    # Giả sử: thành công khi "Giai đoạn" (đã mã hóa) bằng giá trị tương ứng với '90% - Thực hiện hợp đồng'
+    # Chú ý: Hãy chắc chắn rằng '90% - Thực hiện hợp đồng' có trong dữ liệu ban đầu.
     try:
-        # Kiểm tra dữ liệu đầu vào
-        if df_model.empty:
-            raise ValueError("Dataframe rỗng, không thể thực hiện phân tích dự đoán")
-            
-        # Kiểm tra các cột bắt buộc
-        required_cols = ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 
-                        'Nhân viên kinh doanh', 'Doanh thu dự kiến', 
-                        'Tỉ lệ thắng', 'Ngày dự kiến kí HĐ', 'Thời điểm tạo']
-        missing_cols = [col for col in required_cols if col not in df_model.columns]
-        if missing_cols:
-            raise KeyError(f"Thiếu các cột quan trọng: {', '.join(missing_cols)}")
-
-        # Xử lý dữ liệu
-        le = LabelEncoder()
-        categorical_cols = ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 'Nhân viên kinh doanh']
-        
-        # Mã hóa các biến categorical
-        for col in categorical_cols:
-            if df_model[col].nunique() == 0:
-                raise ValueError(f"Cột {col} không có dữ liệu hợp lệ")
-            df_model[col] = le.fit_transform(df_model[col].astype(str))
-        
-        # Ensure '90% - Thực hiện hợp đồng' is seen by the LabelEncoder
-        if '90% - Thực hiện hợp đồng' not in le.classes_:
-            le.classes_ = np.append(le.classes_, '90% - Thực hiện hợp đồng')
-
-        # Tính toán time_to_sign
-        df_model['time_to_sign'] = (df_model['Ngày dự kiến kí HĐ'] - df_model['Thời điểm tạo']).dt.days
-        df_model = df_model[df_model['time_to_sign'] > 0]  # Loại bỏ giá trị âm
-        
-        # Kiểm tra lại sau xử lý
-        if df_model.empty:
-            raise ValueError("Không đủ dữ liệu sau khi xử lý")
-            
-        # Chuẩn bị features và target
-        X = df_model[categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng']]
-        y = df_model['time_to_sign']
-        
-        # Handle missing values by imputing
-        imputer = SimpleImputer(strategy='mean')
-        X = imputer.fit_transform(X)
-        
-        # Thêm kiểm tra cuối cùng cho dữ liệu
-        if X.shape[0] == 0 or y.shape[0] == 0:
-            raise ValueError("Dữ liệu đầu vào không hợp lệ cho mô hình")
-            
-        # Huấn luyện mô hình
-        rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
-        rf_model.fit(X, y)
-    
-        feature_importance = pd.DataFrame({
-            'feature': categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng'],
-            'importance': rf_model.feature_importances_
-        }).sort_values('importance', ascending=False)
-        
-        # Dự đoán khả năng thành công của cơ hội
-        logistic_model = LogisticRegression()
-        logistic_model.fit(X, (df_model['Giai đoạn'] == le.transform(['90% - Thực hiện hợp đồng'])[0]).astype(int))
-        success_prob = logistic_model.predict_proba(X)[:, 1]
-        df_model['success_prob'] = success_prob
-        
-        # Dự đoán doanh thu thực tế
-        revenue_model = RandomForestRegressor(n_estimators=100, random_state=42)
-        revenue_model.fit(X, df_model['Doanh thu dự kiến'])
-        df_model['predicted_revenue'] = revenue_model.predict(X)
-        
-        # Phân loại cơ hội theo mức độ rủi ro
-        kmeans = KMeans(n_clusters=3, random_state=42)
-        df_model['risk_level'] = kmeans.fit_predict(X)
-        
-        # Dự báo xu hướng doanh thu theo thời gian
-        df_model['Thời điểm tạo'] = pd.to_datetime(df_model['Thời điểm tạo'], errors='coerce')
-        time_series_data = df_model.set_index('Thời điểm tạo').resample('M')['Doanh thu dự kiến'].sum()
-    
+        success_target = (df_model['Giai đoạn'] == le.transform(['90% - Thực hiện hợp đồng'])[0]).astype(int)
     except Exception as e:
-        st.error(f"Lỗi phân tích dự đoán: {str(e)}")
-        return None, None, None
-
+        raise ValueError(f"Không thể chuyển đổi giá trị '90% - Thực hiện hợp đồng': {e}")
+    
+    logistic_model = LogisticRegression(max_iter=1000)
+    logistic_model.fit(X, success_target)
+    success_prob = logistic_model.predict_proba(X)[:, 1]
+    df_model['success_prob'] = success_prob
+    
+    # Dự đoán doanh thu thực tế bằng RandomForestRegressor
+    revenue_model = RandomForestRegressor(n_estimators=100, random_state=42)
+    revenue_model.fit(X, df_model['Doanh thu dự kiến'])
+    df_model['predicted_revenue'] = revenue_model.predict(X)
+    
+    # Phân loại cơ hội theo mức độ rủi ro bằng KMeans (3 cụm)
+    from sklearn.cluster import KMeans
+    kmeans = KMeans(n_clusters=3, random_state=42)
+    df_model['risk_level'] = kmeans.fit_predict(X)
+    
+    # Dự báo xu hướng doanh thu theo thời gian
+    df_model['Thời điểm tạo'] = pd.to_datetime(df_model['Thời điểm tạo'], errors='coerce')
+    time_series_data = df_model.set_index('Thời điểm tạo').resample('M')['Doanh thu dự kiến'].sum()
+    
     return feature_importance, df_model, time_series_data
+
 
 # Tính các chỉ số phân tích chuẩn đoán
 def calculate_diagnostic_metrics(df):
