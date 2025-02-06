@@ -118,19 +118,8 @@ def show_revenue_by_stage(df):
 def show_detailed_data(df):
     try:
         st.subheader("Dữ liệu chi tiết")
-        
-        # Tạo một bản sao của df để định dạng dữ liệu
-        formatted_df = df.copy()
-        
-        # Chuyển đổi 'Doanh thu dự kiến' và 'Tỉ lệ thắng' sang định dạng số
-        if 'Doanh thu dự kiến' in formatted_df.columns:
-            formatted_df['Doanh thu dự kiến'] = pd.to_numeric(formatted_df['Doanh thu dự kiến'], errors='coerce')
-        if 'Tỉ lệ thắng' in formatted_df.columns:
-            formatted_df['Tỉ lệ thắng'] = pd.to_numeric(formatted_df['Tỉ lệ thắng'], errors='coerce')
-        
-        # Định dạng dữ liệu khi hiển thị
         st.dataframe(
-            formatted_df.style.format({
+            df.style.format({
                 "Doanh thu dự kiến": "{:,.0f}",
                 "Tỉ lệ thắng": "{:.1f}%"
             })
@@ -147,25 +136,6 @@ def show_detailed_data(df):
         )
     except Exception as e:
         st.error(f"Lỗi khi hiển thị dữ liệu chi tiết: {str(e)}")
-
-def show_additional_metrics(df):
-    try:
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            win_rate = df[df['Trạng thái'] == 'Active']['Tỉ lệ thắng'].mean()
-            st.metric("Tỉ lệ thắng trung bình", f"{win_rate:.1f}%")
-        
-        with col2:
-            active_opportunities = len(df[df['Trạng thái'] == 'Active'])
-            st.metric("Số cơ hội đang hoạt động", f"{active_opportunities:,}")
-        
-        with col3:
-            avg_conversion_time = (df['Ngày dự kiến kí HĐ'] - df['Thời điểm tạo']).mean()
-            st.metric("Thời gian chuyển đổi trung bình", f"{avg_conversion_time.days} ngày")
-            
-    except Exception as e:
-        st.error(f"Lỗi khi tính toán các metrics bổ sung: {str(e)}")
 
 def main():
     st.title('🎯 Phân Tích Funnel')
@@ -186,10 +156,6 @@ def main():
             # Hiển thị các metrics cơ bản
             st.header("1. Tổng quan")
             show_basic_metrics(filtered_df)
-            
-            # Hiển thị các metrics bổ sung
-            st.header("1.1 Metrics bổ sung")
-            show_additional_metrics(filtered_df)
             
             # Hiển thị biểu đồ phân bố doanh thu
             st.header("2. Phân tích doanh thu")
