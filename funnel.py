@@ -235,6 +235,10 @@ def calculate_predictive_metrics(df):
             if df_model[col].nunique() == 0:
                 raise ValueError(f"Cột {col} không có dữ liệu hợp lệ")
             df_model[col] = le.fit_transform(df_model[col].astype(str))
+        
+        # Ensure '90% - Thực hiện hợp đồng' is seen by the LabelEncoder
+        if '90% - Thực hiện hợp đồng' not in le.classes_:
+            le.classes_ = np.append(le.classes_, '90% - Thực hiện hợp đồng')
 
         # Tính toán time_to_sign
         df_model['time_to_sign'] = (df_model['Ngày dự kiến kí HĐ'] - df_model['Thời điểm tạo']).dt.days
