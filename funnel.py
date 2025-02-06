@@ -51,59 +51,6 @@ def load_data(file):
         st.error(f"Lỗi khi đọc file: {str(e)}")
         return None
 
-import pandas as pd
-import streamlit as st
-import plotly.express as px
-import plotly.graph_objects as go
-from io import BytesIO
-import openpyxl
-import numpy as np
-from sklearn.preprocessing import LabelEncoder
-from sklearn.ensemble import RandomForestRegressor
-
-# Cấu hình trang Streamlit
-st.set_page_config(layout="wide", page_title="Phân Tích Funnel")
-
-# CSS tùy chỉnh giao diện
-st.markdown("""
-    <style>
-    .main > div {
-        padding: 2rem;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 2rem;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 3rem;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# ------------------- Hàm xử lý dữ liệu ------------------- #
-@st.cache_data
-def load_data(file):
-    try:
-        if file.name.endswith('.csv'):
-            df = pd.read_csv(file)
-        elif file.name.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(file)
-        else:
-            st.error("Định dạng file không được hỗ trợ. Vui lòng sử dụng CSV hoặc Excel.")
-            return None
-
-        # Loại bỏ khoảng trắng thừa ở tên cột
-        df.columns = df.columns.str.strip()
-
-        # Chuyển đổi các cột ngày tháng
-        date_columns = ["Ngày dự kiến kí HĐ", "Thời điểm tạo"]
-        for col in date_columns:
-            df[col] = pd.to_datetime(df[col], format="%d/%m/%Y", errors='coerce')
-        
-        return df
-    except Exception as e:
-        st.error(f"Lỗi khi đọc file: {str(e)}")
-        return None
-
 # ------------------- Hàm lọc dữ liệu ------------------- #
 
 def apply_filters(df, filters):
@@ -152,7 +99,6 @@ def show_filters(df):
     }
     
     return apply_filters(df, filters)
-
 
 # ------------------- Hàm hiển thị trang bìa ------------------- #
 
