@@ -9,8 +9,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LogisticRegression
 from sklearn.cluster import KMeans
-from sklearn.metrics import mean_absolute_error
-from scipy.stats import pearsonr, spearmanr
+from sklearn.impute import SimpleImputer
 
 # Cấu hình trang Streamlit
 st.set_page_config(layout="wide", page_title="Phân Tích Funnel")
@@ -211,6 +210,7 @@ def calculate_descriptive_metrics(df):
 
 # Tính các chỉ số phân tích dự đoán
 def calculate_predictive_metrics(df):
+    # Chuẩn bị dữ liệu cho mô hình
     df_model = df.copy()
     
     try:
@@ -252,6 +252,10 @@ def calculate_predictive_metrics(df):
         X = df_model[categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng']]
         y = df_model['time_to_sign']
         
+        # Handle missing values by imputing
+        imputer = SimpleImputer(strategy='mean')
+        X = imputer.fit_transform(X)
+        
         # Thêm kiểm tra cuối cùng cho dữ liệu
         if X.shape[0] == 0 or y.shape[0] == 0:
             raise ValueError("Dữ liệu đầu vào không hợp lệ cho mô hình")
@@ -261,7 +265,7 @@ def calculate_predictive_metrics(df):
         rf_model.fit(X, y)
     
         feature_importance = pd.DataFrame({
-            'feature': X.columns,
+            'feature': categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng'],
             'importance': rf_model.feature_importances_
         }).sort_values('importance', ascending=False)
         
@@ -329,6 +333,8 @@ def main():
             # Tính toán các chỉ số
             desc_metrics = calculate_descriptive_metrics(filtered_df)
             feature_importance, df_with_predictions, time_series_data = calculate_predictive_metrics(filtered_df)
+            if feature_importance is None or df_with_predictions is None or time_series_data is None:
+                return
             corr_matrix, sales_performance = calculate_diagnostic_metrics(filtered_df)
 
             # Hiển thị dashboard
