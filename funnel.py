@@ -269,7 +269,7 @@ def show_avg_time_by_stage(df):
             st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
         st.error(f"Lỗi khi tạo biểu đồ thời gian xử lý trung bình theo giai đoạn: {str(e)}")
-        
+
 def show_win_rate_by_sales_team(df):
     try:
         if 'Đội ngũ bán hàng' in df.columns and 'Tỉ lệ thắng' in df.columns:
