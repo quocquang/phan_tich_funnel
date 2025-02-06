@@ -212,23 +212,50 @@ def calculate_descriptive_metrics(df):
 # Tính các chỉ số phân tích dự đoán
 def calculate_predictive_metrics(df):
     # Chuẩn bị dữ liệu cho mô hình
-    le = LabelEncoder()
     df_model = df.copy()
     
-    # Mã hóa các biến categorical
-    categorical_cols = ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 'Nhân viên kinh doanh']
-    for col in categorical_cols:
-        df_model[col] = le.fit_transform(df_model[col])
-    
-    # Ensure there are no NaNs or infinite values
-    df_model = df_model.replace([np.inf, -np.inf], np.nan).dropna()
+    try:
+        # Kiểm tra dữ liệu đầu vào
+        if df_model.empty:
+            raise ValueError("Dataframe rỗng, không thể thực hiện phân tích dự đoán")
+            
+        # Kiểm tra các cột bắt buộc
+        required_cols = ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 
+                        'Nhân viên kinh doanh', 'Doanh thu dự kiến', 
+                        'Tỉ lệ thắng', 'Ngày dự kiến kí HĐ', 'Thời điểm tạo']
+        missing_cols = [col for col in required_cols if col not in df_model.columns]
+        if missing_cols:
+            raise KeyError(f"Thiếu các cột quan trọng: {', '.join(missing_cols)}")
 
-    # Feature importance
-    X = df_model[categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng']]
-    y = df_model['time_to_sign']
-    
-    rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
-    rf_model.fit(X, y)
+        # Xử lý dữ liệu
+        le = LabelEncoder()
+        categorical_cols = ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 'Nhân viên kinh doanh']
+        
+        # Mã hóa các biến categorical
+        for col in categorical_cols:
+            if df_model[col].nunique() == 0:
+                raise ValueError(f"Cột {col} không có dữ liệu hợp lệ")
+            df_model[col] = le.fit_transform(df_model[col].astype(str))
+
+        # Tính toán time_to_sign
+        df_model['time_to_sign'] = (df_model['Ngày dự kiến kí HĐ'] - df_model['Thời điểm tạo']).dt.days
+        df_model = df_model[df_model['time_to_sign'] > 0]  # Loại bỏ giá trị âm
+        
+        # Kiểm tra lại sau xử lý
+        if df_model.empty:
+            raise ValueError("Không đủ dữ liệu sau khi xử lý")
+            
+        # Chuẩn bị features và target
+        X = df_model[categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng']]
+        y = df_model['time_to_sign']
+        
+        # Thêm kiểm tra cuối cùng cho dữ liệu
+        if X.shape[0] == 0 or y.shape[0] == 0:
+            raise ValueError("Dữ liệu đầu vào không hợp lệ cho mô hình")
+            
+        # Huấn luyện mô hình
+        rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
+        rf_model.fit(X, y)
     
     feature_importance = pd.DataFrame({
         'feature': X.columns,
@@ -254,6 +281,10 @@ def calculate_predictive_metrics(df):
     df_model['Thời điểm tạo'] = pd.to_datetime(df_model['Thời điểm tạo'], errors='coerce')
     time_series_data = df_model.set_index('Thời điểm tạo').resample('M')['Doanh thu dự kiến'].sum()
     
+    except Exception as e:
+        st.error(f"Lỗi phân tích dự đoán: {str(e)}")
+        return None, None, None
+
     return feature_importance, df_model, time_series_data
 
 # Tính các chỉ số phân tích chuẩn đoán
