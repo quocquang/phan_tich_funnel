@@ -380,22 +380,22 @@ def main():
             # Dữ liệu chi tiết
             st.header("5. Dữ liệu chi tiết")
             st.dataframe(
-                filtered_df.style.format({
+            filtered_df.style.format({
                     "Doanh thu dự kiến": "{:,.0f}",
                     "Tỉ lệ thắng": "{:.1f}%"
-                })
-            )
-       # Download button
+    })
+)
+
+# Download button
         csv = filtered_df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            "Tải dữ liệu",
-            csv,
-            "data.csv",
-            "text/csv",
-            key='download-csv'
+        "Tải dữ liệu",
+    csv,
+    "data.csv",
+    "text/csv",
+    key='download-csv'
 )
 else:
     st.info("Vui lòng tải lên file dữ liệu để bắt đầu phân tích.")
-
 if __name__ == '__main__':
     main()
