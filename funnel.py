@@ -91,7 +91,7 @@ def show_basic_metrics(df):
         # Chuyển đổi 'Doanh thu dự kiến' sang kiểu số
         df['Doanh thu dự kiến'] = pd.to_numeric(df['Doanh thu dự kiến'], errors='coerce')
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
         
         with col1:
             total_opportunities = len(df)
@@ -104,6 +104,18 @@ def show_basic_metrics(df):
         with col3:
             avg_revenue = df['Doanh thu dự kiến'].mean()
             st.metric("Doanh thu trung bình", f"{avg_revenue:,.0f} VND")
+
+       with col4:
+            win_rate = df[df['Trạng thái'] == 'Active']['Tỉ lệ thắng'].mean()
+            st.metric("Tỉ lệ thắng trung bình", f"{win_rate:.1f}%")
+        
+        with col5:
+            active_opportunities = len(df[df['Trạng thái'] == 'Active'])
+            st.metric("Số cơ hội đang hoạt động", f"{active_opportunities:,}")
+        
+        with col6:
+            avg_conversion_time = (df['Ngày dự kiến kí HĐ'] - df['Thời điểm tạo']).mean()
+            st.metric("Thời gian chuyển đổi trung bình", f"{avg_conversion_time.days} ngày")
             
     except Exception as e:
         st.error(f"Lỗi khi tính toán metrics cơ bản: {str(e)}")
@@ -151,25 +163,6 @@ def show_detailed_data(df):
         )
     except Exception as e:
         st.error(f"Lỗi khi hiển thị dữ liệu chi tiết: {str(e)}")
-
-def show_additional_metrics(df):
-    try:
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            win_rate = df[df['Trạng thái'] == 'Active']['Tỉ lệ thắng'].mean()
-            st.metric("Tỉ lệ thắng trung bình", f"{win_rate:.1f}%")
-        
-        with col2:
-            active_opportunities = len(df[df['Trạng thái'] == 'Active'])
-            st.metric("Số cơ hội đang hoạt động", f"{active_opportunities:,}")
-        
-        with col3:
-            avg_conversion_time = (df['Ngày dự kiến kí HĐ'] - df['Thời điểm tạo']).mean()
-            st.metric("Thời gian chuyển đổi trung bình", f"{avg_conversion_time.days} ngày")
-            
-    except Exception as e:
-        st.error(f"Lỗi khi tính toán các metrics bổ sung: {str(e)}")
 
 def show_opportunities_by_customer(df):
     try:
@@ -226,6 +219,35 @@ def show_conversion_rate_by_stage(df):
     except Exception as e:
         st.error(f"Lỗi khi tạo biểu đồ tỉ lệ chuyển đổi theo giai đoạn: {str(e)}")
 
+def show_sales_by_salesperson(df):
+    try:
+        if 'Nhân viên kinh doanh' in df.columns and 'Doanh thu dự kiến' in df.columns:
+            sales_by_salesperson = df.groupby('Nhân viên kinh doanh')['Doanh thu dự kiến'].sum().reset_index()
+            
+            fig = px.bar(sales_by_salesperson, 
+                         x='Nhân viên kinh doanh', 
+                         y='Doanh thu dự kiến',
+                         title="Doanh thu theo nhân viên kinh doanh",
+                         labels={'Nhân viên kinh doanh': 'Nhân viên kinh doanh', 'Doanh thu dự kiến': 'Doanh thu dự kiến (VND)'})
+            st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Lỗi khi tạo biểu đồ doanh thu theo nhân viên kinh doanh: {str(e)}")
+
+def show_opportunities_by_competitor(df):
+    try:
+        if 'Đối thủ' in df.columns:
+            opportunities_by_competitor = df['Đối thủ'].value_counts().reset_index()
+            opportunities_by_competitor.columns = ['Đối thủ', 'Số cơ hội']
+            
+            fig = px.bar(opportunities_by_competitor, 
+                         x='Đối thủ', 
+                         y='Số cơ hội',
+                         title="Số cơ hội theo đối thủ",
+                         labels={'Đối thủ': 'Đối thủ', 'Số cơ hội': 'Số cơ hội'})
+            st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Lỗi khi tạo biểu đồ số cơ hội theo đối thủ: {str(e)}")
+
 def main():
     st.title('🎯 Phân Tích Funnel')
     
@@ -246,10 +268,6 @@ def main():
             st.header("1. Tổng quan")
             show_basic_metrics(filtered_df)
             
-            # Hiển thị các metrics bổ sung
-            st.header("1.1 Metrics bổ sung")
-            show_additional_metrics(filtered_df)
-            
             # Hiển thị biểu đồ phân bố doanh thu
             st.header("2. Phân tích doanh thu")
             show_revenue_by_stage(filtered_df)
@@ -269,9 +287,17 @@ def main():
             # Hiển thị biểu đồ tỉ lệ chuyển đổi theo giai đoạn
             st.header("6. Tỉ lệ chuyển đổi theo giai đoạn")
             show_conversion_rate_by_stage(filtered_df)
+
+            # Hiển thị biểu đồ doanh thu theo nhân viên kinh doanh
+            st.header("7. Doanh thu theo nhân viên kinh doanh")
+            show_sales_by_salesperson(filtered_df)
+            
+            # Hiển thị biểu đồ số cơ hội theo đối thủ
+            st.header("8. Số cơ hội theo đối thủ")
+            show_opportunities_by_competitor(filtered_df)
             
             # Hiển thị dữ liệu chi tiết
-            st.header("7. Dữ liệu chi tiết")
+            st.header("9. Dữ liệu chi tiết")
             show_detailed_data(filtered_df)
             
         else:
