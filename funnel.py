@@ -148,6 +148,53 @@ def show_detailed_data(df):
     except Exception as e:
         st.error(f"Lỗi khi hiển thị dữ liệu chi tiết: {str(e)}")
 
+def show_additional_metrics(df):
+    try:
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            win_rate = df[df['Trạng thái'] == 'Active']['Tỉ lệ thắng'].mean()
+            st.metric("Tỉ lệ thắng trung bình", f"{win_rate:.1f}%")
+        
+        with col2:
+            active_opportunities = len(df[df['Trạng thái'] == 'Active'])
+            st.metric("Số cơ hội đang hoạt động", f"{active_opportunities:,}")
+        
+        with col3:
+            avg_conversion_time = (df['Ngày dự kiến kí HĐ'] - df['Thời điểm tạo']).mean()
+            st.metric("Thời gian chuyển đổi trung bình", f"{avg_conversion_time.days} ngày")
+            
+    except Exception as e:
+        st.error(f"Lỗi khi tính toán các metrics bổ sung: {str(e)}")
+
+def show_opportunities_by_customer(df):
+    try:
+        customer_opportunities = df['Tên khách hàng'].value_counts().reset_index()
+        customer_opportunities.columns = ['Tên khách hàng', 'Số cơ hội']
+        
+        fig = px.bar(customer_opportunities, 
+                     x='Tên khách hàng', 
+                     y='Số cơ hội',
+                     title="Số cơ hội theo khách hàng",
+                     labels={'Tên khách hàng': 'Tên khách hàng', 'Số cơ hội': 'Số cơ hội'})
+        st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Lỗi khi tạo biểu đồ số cơ hội theo khách hàng: {str(e)}")
+
+def show_revenue_by_region(df):
+    try:
+        if 'Tỉnh/TP' in df.columns and 'Doanh thu dự kiến' in df.columns:
+            revenue_by_region = df.groupby('Tỉnh/TP')['Doanh thu dự kiến'].sum().reset_index()
+            
+            fig = px.bar(revenue_by_region, 
+                         x='Tỉnh/TP', 
+                         y='Doanh thu dự kiến',
+                         title="Doanh thu dự kiến theo vùng",
+                         labels={'Tỉnh/TP': 'Tỉnh/TP', 'Doanh thu dự kiến': 'Doanh thu dự kiến (VND)'})
+            st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Lỗi khi tạo biểu đồ doanh thu theo vùng: {str(e)}")
+
 def main():
     st.title('🎯 Phân Tích Funnel')
     
@@ -168,12 +215,24 @@ def main():
             st.header("1. Tổng quan")
             show_basic_metrics(filtered_df)
             
+            # Hiển thị các metrics bổ sung
+            st.header("1.1 Metrics bổ sung")
+            show_additional_metrics(filtered_df)
+            
             # Hiển thị biểu đồ phân bố doanh thu
             st.header("2. Phân tích doanh thu")
             show_revenue_by_stage(filtered_df)
             
+            # Hiển thị biểu đồ số cơ hội theo khách hàng
+            st.header("3. Số cơ hội theo khách hàng")
+            show_opportunities_by_customer(filtered_df)
+            
+            # Hiển thị biểu đồ doanh thu theo vùng
+            st.header("4. Doanh thu theo vùng")
+            show_revenue_by_region(filtered_df)
+            
             # Hiển thị dữ liệu chi tiết
-            st.header("3. Dữ liệu chi tiết")
+            st.header("5. Dữ liệu chi tiết")
             show_detailed_data(filtered_df)
             
         else:
