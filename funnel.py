@@ -210,76 +210,75 @@ def calculate_descriptive_metrics(df):
 
 # Tính các chỉ số phân tích dự đoán
 def calculate_predictive_metrics(df):
-    # Chuẩn bị dữ liệu cho mô hình
-    df_model = df.copy()
-    
-    # Kiểm tra dữ liệu đầu vào
-    if df_model.empty:
-        raise ValueError("Dataframe rỗng, không thể thực hiện phân tích dự đoán")
+    try:
+        # Chuẩn bị dữ liệu cho mô hình
+        df_model = df.copy()
         
-    # Các cột bắt buộc
-    required_cols = ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 
-                     'Nhân viên kinh doanh', 'Doanh thu dự kiến', 
-                     'Tỉ lệ thắng', 'Ngày dự kiến kí HĐ', 'Thời điểm tạo']
-    missing_cols = [col for col in required_cols if col not in df_model.columns]
-    if missing_cols:
-        raise KeyError(f"Thiếu các cột quan trọng: {', '.join(missing_cols)}")
-    
-    # Tính toán time_to_sign nếu chưa có
-    if "time_to_sign" not in df_model.columns:
+        # Kiểm tra dữ liệu đầu vào
+        if df_model.empty:
+            return None, None, None
+            
+        # Các cột bắt buộc
+        required_cols = ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 
+                        'Nhân viên kinh doanh', 'Doanh thu dự kiến', 
+                        'Tỉ lệ thắng', 'Ngày dự kiến kí HĐ', 'Thời điểm tạo']
+        missing_cols = [col for col in required_cols if col not in df_model.columns]
+        if missing_cols:
+            return None, None, None
+        
+        # Tính toán time_to_sign
         df_model["time_to_sign"] = (df_model["Ngày dự kiến kí HĐ"] - df_model["Thời điểm tạo"]).dt.days
-    
-    # Loại bỏ những dòng có time_to_sign không hợp lệ (ví dụ: <= 0)
-    df_model = df_model[df_model["time_to_sign"] > 0]
-    
-    # Chuyển đổi các cột số về kiểu numeric
-    df_model['Doanh thu dự kiến'] = pd.to_numeric(df_model['Doanh thu dự kiến'], errors='coerce')
-    
-    # Xử lý cột "Tỉ lệ thắng"
-    if df_model['Tỉ lệ thắng'].dtype == object:
-        df_model['Tỉ lệ thắng'] = pd.to_numeric(df_model['Tỉ lệ thắng'].str.replace('%', ''), errors='coerce')
-    else:
-        df_model['Tỉ lệ thắng'] = pd.to_numeric(df_model['Tỉ lệ thắng'], errors='coerce')
-    
-    # Mã hóa các biến categorical
-    categorical_cols = ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 'Nhân viên kinh doanh']
-    from sklearn.preprocessing import LabelEncoder
-    le = LabelEncoder()
-    for col in categorical_cols:
-        df_model[col] = le.fit_transform(df_model[col].astype(str))
-    
-    # Chuẩn bị tập tính năng và mục tiêu
-    X = df_model[categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng']]
-    y = df_model['time_to_sign'].values  # ép y thành mảng NumPy
-    
-    # Xử lý giá trị thiếu bằng SimpleImputer
-    from sklearn.impute import SimpleImputer
-    imputer = SimpleImputer(strategy='mean')
-    X = imputer.fit_transform(X)
-    
-    # Kiểm tra kích thước của X và y
-    if X.shape[0] != y.shape[0]:
-        raise ValueError(f"Kích thước không khớp: X có {X.shape[0]} mẫu, y có {y.shape[0]} mẫu")
-    
-    # Huấn luyện mô hình RandomForestRegressor để tính feature importance
-    from sklearn.ensemble import RandomForestRegressor
-    rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
-    rf_model.fit(X, y)
-    
-    feature_importance = pd.DataFrame({
-        'feature': categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng'],
-        'importance': rf_model.feature_importances_
-    }).sort_values('importance', ascending=False)
-    
-    # Các bước dự đoán khác (ví dụ: Logistic Regression, KMeans, vv.)
-    # ...
-    
-    # Dự báo xu hướng doanh thu theo thời gian
-    df_model['Thời điểm tạo'] = pd.to_datetime(df_model['Thời điểm tạo'], errors='coerce')
-    time_series_data = df_model.set_index('Thời điểm tạo').resample('M')['Doanh thu dự kiến'].sum()
-    
-    return feature_importance, df_model, time_series_data
-
+        df_model = df_model[df_model["time_to_sign"] > 0]
+        
+        # Chuyển đổi các cột số
+        df_model['Doanh thu dự kiến'] = pd.to_numeric(df_model['Doanh thu dự kiến'], errors='coerce')
+        df_model['Tỉ lệ thắng'] = pd.to_numeric(df_model['Tỉ lệ thắng'].astype(str).str.replace('%', ''), errors='coerce')
+        
+        # Mã hóa các biến categorical
+        categorical_cols = ['Giai đoạn', 'Trạng thái', 'Ngành hàng', 'Nhân viên kinh doanh']
+        le = LabelEncoder()
+        for col in categorical_cols:
+            df_model[col] = le.fit_transform(df_model[col].astype(str))
+        
+        # Chuẩn bị features
+        feature_cols = categorical_cols + ['Doanh thu dự kiến', 'Tỉ lệ thắng']
+        X = df_model[feature_cols].copy()
+        
+        # Xử lý missing values
+        imputer = SimpleImputer(strategy='mean')
+        X = pd.DataFrame(imputer.fit_transform(X), columns=feature_cols)
+        
+        # Chuẩn bị target
+        y = df_model['time_to_sign'].values
+        
+        # Train RandomForest model
+        rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
+        rf_model.fit(X, y)
+        
+        # Create feature importance DataFrame
+        importance_df = pd.DataFrame({
+            'feature': feature_cols,
+            'importance': rf_model.feature_importances_
+        })
+        importance_df = importance_df.sort_values('importance', ascending=False)
+        
+        # Add predictions to df_model
+        df_model['success_prob'] = rf_model.predict(X)
+        df_model['predicted_revenue'] = df_model['Doanh thu dự kiến'] * (df_model['Tỉ lệ thắng'] / 100)
+        
+        # Add risk levels based on success_prob
+        df_model['risk_level'] = pd.qcut(df_model['success_prob'], 
+                                       q=3, 
+                                       labels=['High Risk', 'Medium Risk', 'Low Risk'])
+        
+        # Prepare time series data
+        time_series_data = df_model.set_index('Thời điểm tạo')['Doanh thu dự kiến'].resample('M').sum()
+        
+        return importance_df, df_model, time_series_data
+        
+    except Exception as e:
+        print(f"Error in calculate_predictive_metrics: {str(e)}")
+        return None, None, None
 
 
 # Tính các chỉ số phân tích chuẩn đoán
