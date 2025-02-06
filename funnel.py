@@ -118,8 +118,19 @@ def show_revenue_by_stage(df):
 def show_detailed_data(df):
     try:
         st.subheader("Dữ liệu chi tiết")
+        
+        # Tạo một bản sao của df để định dạng dữ liệu
+        formatted_df = df.copy()
+        
+        # Chuyển đổi 'Doanh thu dự kiến' và 'Tỉ lệ thắng' sang định dạng số
+        if 'Doanh thu dự kiến' in formatted_df.columns:
+            formatted_df['Doanh thu dự kiến'] = pd.to_numeric(formatted_df['Doanh thu dự kiến'], errors='coerce')
+        if 'Tỉ lệ thắng' in formatted_df.columns:
+            formatted_df['Tỉ lệ thắng'] = pd.to_numeric(formatted_df['Tỉ lệ thắng'], errors='coerce')
+        
+        # Định dạng dữ liệu khi hiển thị
         st.dataframe(
-            df.style.format({
+            formatted_df.style.format({
                 "Doanh thu dự kiến": "{:,.0f}",
                 "Tỉ lệ thắng": "{:.1f}%"
             })
