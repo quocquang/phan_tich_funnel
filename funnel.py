@@ -105,7 +105,7 @@ def show_basic_metrics(df):
             avg_revenue = df['Doanh thu dự kiến'].mean()
             st.metric("Doanh thu trung bình", f"{avg_revenue:,.0f} VND")
 
-       with col4:
+        with col4:
             win_rate = df[df['Trạng thái'] == 'Active']['Tỉ lệ thắng'].mean()
             st.metric("Tỉ lệ thắng trung bình", f"{win_rate:.1f}%")
         
