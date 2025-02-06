@@ -382,14 +382,20 @@ def main():
             st.dataframe(
                 filtered_df.style.format({
                     "Doanh thu dự kiến": "{:,.0f}",
-                "Tải dữ liệu",
-                csv,
-                "data.csv",
-                "text/csv",
-                key='download-csv'
+                    "Tỉ lệ thắng": "{:.1f}%"
+                })
             )
-        else:
-            st.info("Vui lòng tải lên file dữ liệu để bắt đầu phân tích.")
+       # Download button
+        csv = filtered_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "Tải dữ liệu",
+            csv,
+            "data.csv",
+            "text/csv",
+            key='download-csv'
+)
+else:
+    st.info("Vui lòng tải lên file dữ liệu để bắt đầu phân tích.")
 
 if __name__ == '__main__':
     main()
