@@ -139,6 +139,7 @@ def calculate_descriptive_metrics(df):
     metrics['std_expected_revenue'] = df['Doanh thu dự kiến'].std()
     
     # 7. Tỉ lệ thắng trung bình
+    df['Tỉ lệ thắng'] = pd.to_numeric(df['Tỉ lệ thắng'], errors='coerce')
     metrics['avg_win_rate'] = df['Tỉ lệ thắng'].mean()
     
     # 8. Thời gian trung bình từ tạo đến ký HĐ
