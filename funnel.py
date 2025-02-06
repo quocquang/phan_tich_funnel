@@ -269,6 +269,35 @@ def show_avg_time_by_stage(df):
             st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
         st.error(f"Lỗi khi tạo biểu đồ thời gian xử lý trung bình theo giai đoạn: {str(e)}")
+        
+def show_win_rate_by_sales_team(df):
+    try:
+        if 'Đội ngũ bán hàng' in df.columns and 'Tỉ lệ thắng' in df.columns:
+            win_rate_by_sales_team = df.groupby('Đội ngũ bán hàng')['Tỉ lệ thắng'].mean().reset_index()
+            
+            fig = px.bar(win_rate_by_sales_team, 
+                         x='Đội ngũ bán hàng', 
+                         y='Tỉ lệ thắng',
+                         title="Tỉ lệ thắng theo đội ngũ bán hàng",
+                         labels={'Đội ngũ bán hàng': 'Đội ngũ bán hàng', 'Tỉ lệ thắng': 'Tỉ lệ thắng'})
+            st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Lỗi khi tạo biểu đồ tỉ lệ thắng theo đội ngũ bán hàng: {str(e)}")
+
+def show_opportunities_by_industry(df):
+    try:
+        if 'Ngành hàng' in df.columns:
+            opportunities_by_industry = df['Ngành hàng'].value_counts().reset_index()
+            opportunities_by_industry.columns = ['Ngành hàng', 'Số cơ hội']
+            
+            fig = px.bar(opportunities_by_industry, 
+                         x='Ngành hàng', 
+                         y='Số cơ hội',
+                         title="Số cơ hội theo ngành hàng",
+                         labels={'Ngành hàng': 'Ngành hàng', 'Số cơ hội': 'Số cơ hội'})
+            st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Lỗi khi tạo biểu đồ số cơ hội theo ngành hàng: {str(e)}")
 
 def main():
     st.title('🎯 Phân Tích Funnel')
@@ -326,8 +355,16 @@ def main():
             st.header("9. Thời gian xử lý trung bình theo giai đoạn")
             show_avg_time_by_stage(filtered_df)
             
+            # Hiển thị biểu đồ tỉ lệ thắng theo đội ngũ bán hàng
+            st.header("10. Tỉ lệ thắng theo đội ngũ bán hàng")
+            show_win_rate_by_sales_team(filtered_df)
+            
+            # Hiển thị biểu đồ số cơ hội theo ngành hàng
+            st.header("11. Số cơ hội theo ngành hàng")
+            show_opportunities_by_industry(filtered_df)
+            
             # Hiển thị dữ liệu chi tiết
-            st.header("10. Dữ liệu chi tiết")
+            st.header("12. Dữ liệu chi tiết")
             show_detailed_data(filtered_df)
             
         else:
