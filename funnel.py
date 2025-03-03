@@ -55,7 +55,7 @@ st.markdown("""
 # Tiêu đề và logo
 col1, col2 = st.columns([1, 5])
 with col1:
-    st.image("https://github.com/user-attachments/assets/f263bd14-23a4-4735-b082-1d10ade1bbb0", width=80)  # Thay bằng logo công ty
+    st.image("https://via.placeholder.com/100", width=80)  # Thay bằng logo công ty
 with col2:
     st.title("🎯 Phân Tích Funnel Bán Hàng")
 
