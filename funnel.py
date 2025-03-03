@@ -1,27 +1,65 @@
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
 from io import BytesIO
 import numpy as np
+from datetime import datetime, timedelta
 
 # Cấu hình trang Streamlit
-st.set_page_config(layout="wide", page_title="Phân Tích Funnel")
+st.set_page_config(layout="wide", page_title="Phân Tích Funnel Bán Hàng", page_icon="🎯")
 
 # CSS tùy chỉnh giao diện
 st.markdown("""
     <style>
     .main > div {
         padding: 2rem;
+        background-color: #f8f9fa;
     }
     .stTabs [data-baseweb="tab-list"] {
         gap: 2rem;
+        background-color: white;
+        padding: 0.5rem;
+        border-radius: 0.5rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.12);
     }
     .stTabs [data-baseweb="tab"] {
         height: 3rem;
+        background-color: #f1f3f5;
+        border-radius: 0.3rem;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        background-color: #e9ecef;
+    }
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {
+        background-color: #4e73df;
+        color: white;
+    }
+    .metric-card {
+        background-color: white;
+        border-radius: 0.5rem;
+        padding: 1rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+    }
+    .stSlider > div > div > div > div {
+        color: #4e73df;
+    }
+    .stButton > button {
+        background-color: #4e73df;
+        color: white;
+        border-radius: 0.3rem;
     }
     </style>
 """, unsafe_allow_html=True)
 
+# Tiêu đề và logo
+col1, col2 = st.columns([1, 5])
+with col1:
+    st.image("https://github.com/user-attachments/assets/f263bd14-23a4-4735-b082-1d10ade1bbb0", width=80)  # Thay bằng logo công ty
+with col2:
+    st.title("🎯 Phân Tích Funnel Bán Hàng")
+
+# Hàm tải dữ liệu
 @st.cache_data
 def load_data(file):
     try:
@@ -30,163 +68,251 @@ def load_data(file):
         elif file.name.endswith(('.xlsx', '.xls')):
             df = pd.read_excel(file)
         else:
-            st.error("Định dạng file không được hỗ trợ. Vui lòng sử dụng CSV hoặc Excel.")
+            st.error("Vui lòng tải lên file CSV hoặc Excel.")
             return None
 
-        # Loại bỏ khoảng trắng thừa ở tên cột
+        # Chuẩn hóa dữ liệu
         df.columns = df.columns.str.strip()
-        
-        # Chuyển đổi các cột ngày tháng
         date_columns = ["Ngày dự kiến kí HĐ", "Thời điểm tạo"]
         for col in date_columns:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
-                
-        # Chuyển đổi cột 'Tỉ lệ thắng' từ dạng chuỗi sang số
         if 'Tỉ lệ thắng' in df.columns:
             df['Tỉ lệ thắng'] = df['Tỉ lệ thắng'].str.rstrip('%').astype('float') / 100
-        
+        if 'Doanh thu dự kiến' in df.columns:
+            df['Doanh thu dự kiến'] = pd.to_numeric(df['Doanh thu dự kiến'], errors='coerce')
         return df
     except Exception as e:
         st.error(f"Lỗi khi đọc file: {str(e)}")
         return None
 
+# Hàm hiển thị bộ lọc
 def show_filters(df):
-    st.sidebar.header("Bộ lọc")
-    
-    filters = {}
-    
-    # Chỉ thêm filter cho các cột tồn tại trong DataFrame
-    if "Tên khách hàng" in df.columns:
-        filters["Tên khách hàng"] = st.sidebar.multiselect(
-            "Tên khách hàng:",
-            options=sorted(df["Tên khách hàng"].dropna().unique())
-        )
-    
-    if "Giai đoạn" in df.columns:
-        filters["Giai đoạn"] = st.sidebar.multiselect(
-            "Giai đoạn:",
-            options=sorted(df["Giai đoạn"].dropna().unique())
-        )
+    with st.sidebar.expander("🔍 Bộ Lọc", expanded=True):
+        filters = {}
         
-    if "Tỉ lệ thắng" in df.columns:
-        filters["Tỉ lệ thắng"] = st.sidebar.multiselect(
-            "Tỉ lệ thắng:",
-            options=sorted(df["Tỉ lệ thắng"].dropna().unique())
-        )
-    
-    if "Tỉnh/TP" in df.columns:
-        filters["Tỉnh/TP"] = st.sidebar.multiselect(
-            "Tỉnh/TP:",
-            options=sorted(df["Tỉnh/TP"].dropna().astype(str).unique())
-        )
-    
+        if "Thời điểm tạo" in df.columns:
+            min_date = df["Thời điểm tạo"].min().date()
+            max_date = df["Thời điểm tạo"].max().date()
+            date_range = st.date_input("Phạm vi thời gian:", value=(min_date, max_date))
+            if len(date_range) == 2:
+                filters["Thời điểm tạo"] = date_range
+
+        if "Nhân viên kinh doanh" in df.columns:
+            filters["Nhân viên kinh doanh"] = st.multiselect(
+                "Nhân viên kinh doanh:", options=sorted(df["Nhân viên kinh doanh"].dropna().unique())
+            )
+        
+        if "Tỉnh/TP" in df.columns:
+            filters["Tỉnh/TP"] = st.multiselect(
+                "Tỉnh/TP:", options=sorted(df["Tỉnh/TP"].dropna().unique())
+            )
+
+        if "Doanh thu dự kiến" in df.columns:
+            min_revenue = int(df["Doanh thu dự kiến"].min())
+            max_revenue = int(df["Doanh thu dự kiến"].max())
+            use_slider = st.checkbox("Sử dụng Slider cho Khoảng doanh thu", value=True)
+            
+            if use_slider:
+                revenue_range = st.slider(
+                    "Khoảng doanh thu (VND):", min_revenue, max_revenue, (min_revenue, max_revenue),
+                    step=1000000, format="%d VND"
+                )
+                filters["Doanh thu dự kiến"] = revenue_range
+            else:
+                col1, col2 = st.columns(2)
+                with col1:
+                    min_val = st.number_input("Doanh thu tối thiểu (VND):", min_value=min_revenue, max_value=max_revenue, value=min_revenue, step=1000000)
+                with col2:
+                    max_val = st.number_input("Doanh thu tối đa (VND):", min_value=min_revenue, max_value=max_revenue, value=max_revenue, step=1000000)
+                filters["Doanh thu dự kiến"] = (min_val, max_val)
+
     return apply_filters(df, filters)
 
+# Áp dụng bộ lọc
 def apply_filters(df, filters):
     filtered_df = df.copy()
-    
-    for column, selected_values in filters.items():
-        if selected_values:  # Chỉ áp dụng filter nếu có giá trị được chọn
-            filtered_df = filtered_df[filtered_df[column].isin(selected_values)]
-    
+    for column, values in filters.items():
+        if column == "Thời điểm tạo" and len(values) == 2:
+            start_date, end_date = values
+            filtered_df = filtered_df[
+                (filtered_df[column].dt.date >= start_date) & 
+                (filtered_df[column].dt.date <= end_date)
+            ]
+        elif column == "Doanh thu dự kiến" and len(values) == 2:
+            min_val, max_val = values
+            filtered_df = filtered_df[
+                (filtered_df[column] >= min_val) & 
+                (filtered_df[column] <= max_val)
+            ]
+        elif values:
+            filtered_df = filtered_df[filtered_df[column].isin(values)]
     return filtered_df
 
-def show_basic_metrics(df):
-    try:
-        # Chuyển đổi 'Doanh thu dự kiến' sang kiểu số
-        df['Doanh thu dự kiến'] = pd.to_numeric(df['Doanh thu dự kiến'], errors='coerce')
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            total_opportunities = len(df)
-            st.metric("Tổng số cơ hội", f"{total_opportunities:,}")
-        
-        with col2:
-            total_revenue = df['Doanh thu dự kiến'].sum()
-            st.metric("Tổng doanh thu dự kiến", f"{total_revenue:,.0f} VND")
-        
-        with col3:
-            avg_revenue = df['Doanh thu dự kiến'].mean()
-            st.metric("Doanh thu trung bình", f"{avg_revenue:,.0f} VND")
-            
-    except Exception as e:
-        st.error(f"Lỗi khi tính toán metrics cơ bản: {str(e)}")
+# Dashboard tổng quan
+def show_dashboard(df):
+    st.subheader("📊 Dashboard Tổng Quan")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        total_opps = len(df)
+        st.metric("Tổng cơ hội", f"{total_opps:,}", help="Số lượng cơ hội trong dữ liệu")
+    
+    with col2:
+        total_revenue = df["Doanh thu dự kiến"].sum()
+        st.metric("Doanh thu dự kiến", f"{total_revenue:,.0f} VND", help="Tổng doanh thu dự kiến")
+    
+    with col3:
+        if "Tỉ lệ thắng" in df.columns:
+            avg_win_rate = df["Tỉ lệ thắng"].mean() * 100
+            st.metric("Tỉ lệ thắng TB", f"{avg_win_rate:.1f}%", help="Tỉ lệ thắng trung bình")
 
+    # Biểu đồ Funnel mini
+    if "Giai đoạn" in df.columns:
+        stage_counts = df["Giai đoạn"].value_counts()
+        fig = px.funnel(stage_counts, x=stage_counts.values, y=stage_counts.index)
+        fig.update_layout(height=300, title="Funnel Mini")
+        st.plotly_chart(fig, use_container_width=True)
+
+# Phân tích Funnel
+def show_funnel_analysis(df):
+    if "Giai đoạn" not in df.columns:
+        st.warning("Dữ liệu không chứa cột 'Giai đoạn'.")
+        return
+    
+    st.subheader("🎯 Phân tích Funnel")
+    stage_data = df.groupby("Giai đoạn").agg({
+        "Tên cơ hội": "count",
+        "Doanh thu dự kiến": "sum",
+        "Tỉ lệ thắng": "mean"
+    }).rename(columns={"Tên cơ hội": "Số cơ hội"}).reset_index()
+
+    # Định dạng dữ liệu
+    stage_data["Doanh thu dự kiến"] = stage_data["Doanh thu dự kiến"].apply(lambda x: f"{x:,.0f} VND")
+    stage_data["Tỉ lệ thắng"] = stage_data["Tỉ lệ thắng"].apply(lambda x: f"{x:.2%}")
+
+    # Biểu đồ Funnel
+    fig = go.Figure(go.Funnel(
+        y=stage_data["Giai đoạn"],
+        x=stage_data["Số cơ hội"],
+        textinfo="value+percent initial",
+        marker={"color": "#4e73df"},
+        customdata=stage_data[["Doanh thu dự kiến", "Tỉ lệ thắng"]],
+        hovertemplate="Giai đoạn: %{y}<br>Số cơ hội: %{x}<br>Doanh thu dự kiến: %{customdata[0]}<br>Tỉ lệ thắng: %{customdata[1]}"
+    ))
+    fig.update_layout(title="Phân tích Funnel theo Giai đoạn")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Chi tiết các cơ hội ở mỗi giai đoạn
+    st.subheader("Chi tiết các cơ hội ở mỗi giai đoạn")
+    for stage in stage_data["Giai đoạn"]:
+        stage_opps = df[df["Giai đoạn"] == stage]
+        with st.expander(f"{stage} - {stage_data[stage_data['Giai đoạn'] == stage]['Số cơ hội'].values[0]} cơ hội"):
+            st.dataframe(stage_opps[["Tên cơ hội", "Doanh thu dự kiến", "Tỉ lệ thắng", "Nhân viên kinh doanh"]])
+
+# Phân tích theo nhân viên kinh doanh
+def show_salesperson_analysis(df):
+    if "Nhân viên kinh doanh" not in df.columns:
+        st.warning("Dữ liệu không chứa cột 'Nhân viên kinh doanh'.")
+        return
+    
+    st.subheader("📈 Phân tích theo Nhân viên Kinh doanh")
+    salesperson_data = df.groupby("Nhân viên kinh doanh").agg({
+        "Doanh thu dự kiến": "sum",
+        "Tỉ lệ thắng": "mean",
+        "Giai đoạn": "count"
+    }).rename(columns={"Giai đoạn": "Số cơ hội"}).reset_index()
+
+    # Biểu đồ doanh thu
+    fig1 = px.bar(
+        salesperson_data, x="Nhân viên kinh doanh", y="Doanh thu dự kiến",
+        title="Doanh thu dự kiến theo nhân viên", text_auto=".2s", color_discrete_sequence=["#4e73df"]
+    )
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # Biểu đồ số cơ hội
+    fig2 = px.bar(
+        salesperson_data, x="Nhân viên kinh doanh", y="Số cơ hội",
+        title="Số cơ hội theo nhân viên", color_discrete_sequence=["#36b9cc"]
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+
+# Phân tích theo khu vực địa lý
+def show_area_analysis(df):
+    if "Tỉnh/TP" not in df.columns:
+        st.warning("Dữ liệu không chứa cột 'Tỉnh/TP'.")
+        return
+    
+    st.subheader("🌍 Phân tích theo Khu vực")
+    area_data = df.groupby("Tỉnh/TP").agg({
+        "Doanh thu dự kiến": "sum",
+        "Tỉ lệ thắng": "mean",
+        "Giai đoạn": "count"
+    }).rename(columns={"Giai đoạn": "Số cơ hội"}).reset_index()
+
+    # Biểu đồ doanh thu
+    fig1 = px.bar(
+        area_data, x="Tỉnh/TP", y="Doanh thu dự kiến",
+        title="Doanh thu dự kiến theo khu vực", text_auto=".2s", color_discrete_sequence=["#1cc88a"]
+    )
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # Biểu đồ số cơ hội
+    fig2 = px.bar(
+        area_data, x="Tỉnh/TP", y="Số cơ hội",
+        title="Số cơ hội theo khu vực", color_discrete_sequence=["#f6c23e"]
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+
+# Phân tích theo ngành hàng
+def show_industry_analysis(df):
+    if "Ngành hàng" not in df.columns:
+        st.warning("Dữ liệu không chứa cột 'Ngành hàng'.")
+        return
+    
+    st.subheader("🏭 Phân tích theo Ngành hàng")
+    industry_data = df.groupby("Ngành hàng").agg({
+        "Doanh thu dự kiến": "sum",
+        "Giai đoạn": "count"
+    }).rename(columns={"Giai đoạn": "Số cơ hội"}).reset_index()
+
+    # Biểu đồ tròn doanh thu
+    fig1 = px.pie(industry_data, values="Doanh thu dự kiến", names="Ngành hàng", title="Doanh thu dự kiến theo ngành hàng")
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # Biểu đồ cột số cơ hội
+    fig2 = px.bar(industry_data, x="Ngành hàng", y="Số cơ hội", title="Số cơ hội theo ngành hàng", color_discrete_sequence=["#f6c23e"])
+    st.plotly_chart(fig2, use_container_width=True)
+
+# Phân tích chu kỳ bán hàng
+def show_sales_cycle_analysis(df):
+    if "Thời điểm tạo" not in df.columns or "Ngày dự kiến kí HĐ" not in df.columns:
+        st.warning("Dữ liệu không chứa cột 'Thời điểm tạo' hoặc 'Ngày dự kiến kí HĐ'.")
+        return
+    
+    st.subheader("⏳ Phân tích Chu kỳ Bán hàng")
+    df["Thời gian chuyển đổi (ngày)"] = (df["Ngày dự kiến kí HĐ"] - df["Thời điểm tạo"]).dt.days
+    cycle_data = df.groupby("Giai đoạn")["Thời gian chuyển đổi (ngày)"].mean().reset_index()
+
+    # Biểu đồ cột
+    fig = px.bar(cycle_data, x="Giai đoạn", y="Thời gian chuyển đổi (ngày)", title="Thời gian trung bình giữa các giai đoạn (ngày)", color_discrete_sequence=["#1cc88a"])
+    st.plotly_chart(fig, use_container_width=True)
+
+# Các hàm phân tích bổ sung
 def show_revenue_by_stage(df):
     try:
         if 'Giai đoạn' in df.columns and 'Doanh thu dự kiến' in df.columns:
-            fig = px.box(df, 
-                        x="Giai đoạn", 
-                        y="Doanh thu dự kiến",
-                        title="Phân bố doanh thu dự kiến theo giai đoạn")
+            fig = px.box(df, x="Giai đoạn", y="Doanh thu dự kiến", title="Phân bố doanh thu dự kiến theo giai đoạn")
             st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
         st.error(f"Lỗi khi tạo biểu đồ phân bố doanh thu: {str(e)}")
-
-def show_detailed_data(df):
-    try:
-        st.subheader("Dữ liệu chi tiết")
-        
-        # Tạo một bản sao của df để định dạng dữ liệu
-        formatted_df = df.copy()
-        
-        # Chuyển đổi 'Doanh thu dự kiến' và 'Tỉ lệ thắng' sang định dạng số
-        if 'Doanh thu dự kiến' in formatted_df.columns:
-            formatted_df['Doanh thu dự kiến'] = pd.to_numeric(formatted_df['Doanh thu dự kiến'], errors='coerce')
-        if 'Tỉ lệ thắng' in formatted_df.columns:
-            formatted_df['Tỉ lệ thắng'] = pd.to_numeric(formatted_df['Tỉ lệ thắng'], errors='coerce')
-        
-        # Định dạng dữ liệu khi hiển thị
-        st.dataframe(
-            formatted_df.style.format({
-                "Doanh thu dự kiến": "{:,.0f}",
-                "Tỉ lệ thắng": "{:.1f}%"
-            })
-        )
-        
-        # Download button
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            "📥 Tải xuống dữ liệu",
-            csv,
-            "data.csv",
-            "text/csv",
-            key='download-csv'
-        )
-    except Exception as e:
-        st.error(f"Lỗi khi hiển thị dữ liệu chi tiết: {str(e)}")
-
-def show_additional_metrics(df):
-    try:
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            win_rate = df[df['Trạng thái'] == 'Active']['Tỉ lệ thắng'].mean()
-            st.metric("Tỉ lệ thắng trung bình", f"{win_rate:.1f}%")
-        
-        with col2:
-            active_opportunities = len(df[df['Trạng thái'] == 'Active'])
-            st.metric("Số cơ hội đang hoạt động", f"{active_opportunities:,}")
-        
-        with col3:
-            avg_conversion_time = (df['Ngày dự kiến kí HĐ'] - df['Thời điểm tạo']).mean()
-            st.metric("Thời gian chuyển đổi trung bình", f"{avg_conversion_time.days} ngày")
-            
-    except Exception as e:
-        st.error(f"Lỗi khi tính toán các metrics bổ sung: {str(e)}")
 
 def show_opportunities_by_customer(df):
     try:
         customer_opportunities = df['Tên khách hàng'].value_counts().reset_index()
         customer_opportunities.columns = ['Tên khách hàng', 'Số cơ hội']
         
-        fig = px.bar(customer_opportunities, 
-                     x='Tên khách hàng', 
-                     y='Số cơ hội',
-                     title="Số cơ hội theo khách hàng",
-                     labels={'Tên khách hàng': 'Tên khách hàng', 'Số cơ hội': 'Số cơ hội'})
+        fig = px.bar(customer_opportunities, x='Tên khách hàng', y='Số cơ hội', title="Số cơ hội theo khách hàng")
         st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
         st.error(f"Lỗi khi tạo biểu đồ số cơ hội theo khách hàng: {str(e)}")
@@ -196,11 +322,7 @@ def show_revenue_by_region(df):
         if 'Tỉnh/TP' in df.columns and 'Doanh thu dự kiến' in df.columns:
             revenue_by_region = df.groupby('Tỉnh/TP')['Doanh thu dự kiến'].sum().reset_index()
             
-            fig = px.bar(revenue_by_region, 
-                         x='Tỉnh/TP', 
-                         y='Doanh thu dự kiến',
-                         title="Doanh thu dự kiến theo vùng",
-                         labels={'Tỉnh/TP': 'Tỉnh/TP', 'Doanh thu dự kiến': 'Doanh thu dự kiến (VND)'})
+            fig = px.bar(revenue_by_region, x='Tỉnh/TP', y='Doanh thu dự kiến', title="Doanh thu dự kiến theo vùng")
             st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
         st.error(f"Lỗi khi tạo biểu đồ doanh thu theo vùng: {str(e)}")
@@ -210,10 +332,7 @@ def show_revenue_by_product(df):
         if 'Ngành hàng' in df.columns and 'Doanh thu dự kiến' in df.columns:
             revenue_by_product = df.groupby('Ngành hàng')['Doanh thu dự kiến'].sum().reset_index()
             
-            fig = px.pie(revenue_by_product, 
-                         names='Ngành hàng', 
-                         values='Doanh thu dự kiến',
-                         title="Doanh thu dự kiến theo ngành hàng")
+            fig = px.pie(revenue_by_product, names='Ngành hàng', values='Doanh thu dự kiến', title="Doanh thu dự kiến theo ngành hàng")
             st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
         st.error(f"Lỗi khi tạo biểu đồ doanh thu theo ngành hàng: {str(e)}")
@@ -223,72 +342,10 @@ def show_conversion_rate_by_stage(df):
         if 'Giai đoạn' in df.columns:
             conversion_rate_by_stage = df.groupby('Giai đoạn')['Tỉ lệ thắng'].mean().reset_index()
             
-            fig = px.bar(conversion_rate_by_stage, 
-                         x='Giai đoạn', 
-                         y='Tỉ lệ thắng',
-                         title="Tỉ lệ chuyển đổi theo giai đoạn",
-                         labels={'Giai đoạn': 'Giai đoạn', 'Tỉ lệ thắng': 'Tỉ lệ thắng'})
+            fig = px.bar(conversion_rate_by_stage, x='Giai đoạn', y='Tỉ lệ thắng', title="Tỉ lệ chuyển đổi theo giai đoạn")
             st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
         st.error(f"Lỗi khi tạo biểu đồ tỉ lệ chuyển đổi theo giai đoạn: {str(e)}")
-
-def show_sales_by_salesperson(df):
-    try:
-        if 'Nhân viên kinh doanh' in df.columns and 'Doanh thu dự kiến' in df.columns:
-            sales_by_salesperson = df.groupby('Nhân viên kinh doanh')['Doanh thu dự kiến'].sum().reset_index()
-            
-            fig = px.bar(sales_by_salesperson, 
-                         x='Nhân viên kinh doanh', 
-                         y='Doanh thu dự kiến',
-                         title="Doanh thu theo nhân viên kinh doanh",
-                         labels={'Nhân viên kinh doanh': 'Nhân viên kinh doanh', 'Doanh thu dự kiến': 'Doanh thu dự kiến (VND)'})
-            st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"Lỗi khi tạo biểu đồ doanh thu theo nhân viên kinh doanh: {str(e)}")
-
-def show_opportunities_by_competitor(df):
-    try:
-        if 'Đối thủ' in df.columns:
-            opportunities_by_competitor = df['Đối thủ'].value_counts().reset_index()
-            opportunities_by_competitor.columns = ['Đối thủ', 'Số cơ hội']
-            
-            fig = px.bar(opportunities_by_competitor, 
-                         x='Đối thủ', 
-                         y='Số cơ hội',
-                         title="Số cơ hội theo đối thủ",
-                         labels={'Đối thủ': 'Đối thủ', 'Số cơ hội': 'Số cơ hội'})
-            st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"Lỗi khi tạo biểu đồ số cơ hội theo đối thủ: {str(e)}")
-
-def show_avg_time_by_stage(df):
-    try:
-        if 'Giai đoạn' in df.columns and 'Ngày dự kiến kí HĐ' in df.columns and 'Thời điểm tạo' in df.columns:
-            df['Thời gian xử lý'] = (df['Ngày dự kiến kí HĐ'] - df['Thời điểm tạo']).dt.days
-            avg_time_by_stage = df.groupby('Giai đoạn')['Thời gian xử lý'].mean().reset_index()
-            
-            fig = px.bar(avg_time_by_stage, 
-                         x='Giai đoạn', 
-                         y='Thời gian xử lý',
-                         title="Thời gian xử lý trung bình theo giai đoạn",
-                         labels={'Giai đoạn': 'Giai đoạn', 'Thời gian xử lý': 'Thời gian xử lý (ngày)'})
-            st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"Lỗi khi tạo biểu đồ thời gian xử lý trung bình theo giai đoạn: {str(e)}")
-
-def show_win_rate_by_sales_team(df):
-    try:
-        if 'Tên khách hàng' in df.columns and 'Tỉ lệ thắng' in df.columns:
-            win_rate_by_sales_team = df.groupby('Tên khách hàng')['Tỉ lệ thắng'].mean().reset_index()
-            
-            fig = px.bar(win_rate_by_sales_team, 
-                         x='Tên khách hàng', 
-                         y='Tỉ lệ thắng',
-                         title="Tỉ lệ thắng theo Tên khách hàng",
-                         labels={'Tên khách hàng': 'Tên khách hàng', 'Tỉ lệ thắng': 'Tỉ lệ thắng'})
-            st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"Lỗi khi tạo biểu đồ tỉ lệ thắng theo tên khách hàng: {str(e)}")
 
 def show_opportunities_by_industry(df):
     try:
@@ -296,87 +353,86 @@ def show_opportunities_by_industry(df):
             opportunities_by_industry = df['Ngành hàng'].value_counts().reset_index()
             opportunities_by_industry.columns = ['Ngành hàng', 'Số cơ hội']
             
-            fig = px.bar(opportunities_by_industry, 
-                         x='Ngành hàng', 
-                         y='Số cơ hội',
-                         title="Số cơ hội theo ngành hàng",
-                         labels={'Ngành hàng': 'Ngành hàng', 'Số cơ hội': 'Số cơ hội'})
+            fig = px.bar(opportunities_by_industry, x='Ngành hàng', y='Số cơ hội', title="Số cơ hội theo ngành hàng")
             st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
         st.error(f"Lỗi khi tạo biểu đồ số cơ hội theo ngành hàng: {str(e)}")
 
-def main():
-    st.title('🎯 Phân Tích Funnel')
+# Hàm hiển thị dữ liệu chi tiết và xuất dữ liệu
+def show_detailed_data(df):
+    st.subheader("📋 Dữ liệu chi tiết")
+    st.dataframe(df.style.format({"Doanh thu dự kiến": "{:,.0f}", "Tỉ lệ thắng": "{:.1f}%"}))
     
-    uploaded_file = st.sidebar.file_uploader(
-        "📂 Tải lên file dữ liệu",
-        type=['csv', 'xlsx', 'xls'],
-        help="Hỗ trợ định dạng CSV và Excel"
+    # Export to CSV
+    csv = df.to_csv(index=False)
+    st.download_button(
+        label="Export to CSV",
+        data=csv,
+        file_name="funnel_data.csv",
+        mime="text/csv",
+        key="download-csv"
     )
-    
-    if uploaded_file is not None:
-        df = load_data(uploaded_file)
+
+    # Export to Excel
+    output = BytesIO()
+    writer = pd.ExcelWriter(output, engine='xlsxwriter')
+    df.to_excel(writer, index=False, sheet_name='Sheet1')
+    writer.close()  # Đóng writer thay vì sử dụng save()
+    excel_data = output.getvalue()
+    st.download_button(
+        label="Export to Excel",
+        data=excel_data,
+        file_name="funnel_data.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download-excel"
+    )
+
+# Main
+file = st.sidebar.file_uploader("Tải file dữ liệu (CSV/Excel)", type=["csv", "xlsx"])
+if file:
+    df = load_data(file)
+    if df is not None:
+        filtered_df = show_filters(df)
+
+        # Tabs
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
+            "Tổng quan", "Funnel", "Nhân viên", "Khu vực", "Ngành hàng", "Chu kỳ bán hàng",
+            "Doanh thu theo giai đoạn", "Cơ hội theo khách hàng", "Doanh thu theo vùng",
+            "Doanh thu theo ngành", "Tỉ lệ chuyển đổi", "Dữ liệu chi tiết"
+        ])
         
-        if df is not None:
-            # Áp dụng bộ lọc
-            filtered_df = show_filters(df)
-            
-            # Hiển thị các metrics cơ bản
-            st.header("1. Tổng quan")
-            show_basic_metrics(filtered_df)
-            
-            # Hiển thị các metrics bổ sung
-            st.header("1.1 Metrics bổ sung")
-            show_additional_metrics(filtered_df)
-            
-            # Hiển thị biểu đồ phân bố doanh thu
-            st.header("2. Phân tích doanh thu")
+        with tab1:
+            show_dashboard(filtered_df)
+        
+        with tab2:
+            show_funnel_analysis(filtered_df)
+        
+        with tab3:
+            show_salesperson_analysis(filtered_df)
+        
+        with tab4:
+            show_area_analysis(filtered_df)
+        
+        with tab5:
+            show_industry_analysis(filtered_df)
+        
+        with tab6:
+            show_sales_cycle_analysis(filtered_df)
+        
+        with tab7:
             show_revenue_by_stage(filtered_df)
-            
-            # Hiển thị biểu đồ số cơ hội theo khách hàng
-            st.header("3. Số cơ hội theo khách hàng")
+        
+        with tab8:
             show_opportunities_by_customer(filtered_df)
-            
-            # Hiển thị biểu đồ doanh thu theo vùng
-            st.header("4. Doanh thu theo vùng")
+        
+        with tab9:
             show_revenue_by_region(filtered_df)
-            
-            # Hiển thị biểu đồ doanh thu theo ngành hàng
-            st.header("5. Doanh thu theo ngành hàng")
+        
+        with tab10:
             show_revenue_by_product(filtered_df)
-            
-            # Hiển thị biểu đồ tỉ lệ chuyển đổi theo giai đoạn
-            st.header("6. Tỉ lệ chuyển đổi theo giai đoạn")
+        
+        with tab11:
             show_conversion_rate_by_stage(filtered_df)
-
-            # Hiển thị biểu đồ doanh thu theo nhân viên kinh doanh
-            st.header("7. Doanh thu theo nhân viên kinh doanh")
-            show_sales_by_salesperson(filtered_df)
-            
-            # Hiển thị biểu đồ số cơ hội theo đối thủ
-            st.header("8. Số cơ hội theo đối thủ")
-            show_opportunities_by_competitor(filtered_df)
-            
-            # Hiển thị biểu đồ thời gian xử lý trung bình theo giai đoạn
-            st.header("9. Thời gian xử lý trung bình theo giai đoạn")
-            show_avg_time_by_stage(filtered_df)
-            
-            # Hiển thị biểu đồ tỉ lệ thắng theo tên khách hàng
-            st.header("10. Tỉ lệ thắng theo tên khách hàng")
-            show_win_rate_by_sales_team(filtered_df)
-            
-            # Hiển thị biểu đồ số cơ hội theo ngành hàng
-            st.header("11. Số cơ hội theo ngành hàng")
-            show_opportunities_by_industry(filtered_df)
-            
-            # Hiển thị dữ liệu chi tiết
-            st.header("12. Dữ liệu chi tiết")
+        
+        with tab12:
             show_detailed_data(filtered_df)
-            
-        else:
-            st.info("⚠️ Vui lòng kiểm tra lại file dữ liệu của bạn.")
-    else:
-        st.info("👆 Vui lòng tải lên file dữ liệu để bắt đầu phân tích.")
-
-if __name__ == '__main__':
-    main()
