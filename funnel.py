@@ -1,426 +1,265 @@
-import pandas as pd
 import streamlit as st
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from io import BytesIO
-import numpy as np
-from datetime import datetime, timedelta
+from plotly.subplots import make_subplots
 
-# Cấu hình trang Streamlit
-st.set_page_config(layout="wide", page_title="Phân Tích Funnel Bán Hàng", page_icon="🎯")
+# ==========================================
+# 1. CẤU HÌNH TRANG & STYLE
+# ==========================================
+st.set_page_config(
+    page_title="Deep Dive Spa Dashboard - T12/2025",
+    page_icon="💎",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# CSS tùy chỉnh giao diện
+# Custom CSS cho đẹp hơn
 st.markdown("""
-    <style>
-    .main > div {
-        padding: 2rem;
-        background-color: #f8f9fa;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 2rem;
-        background-color: white;
-        padding: 0.5rem;
-        border-radius: 0.5rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.12);
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 3rem;
-        background-color: #f1f3f5;
-        border-radius: 0.3rem;
-    }
-    .stTabs [data-baseweb="tab"]:hover {
-        background-color: #e9ecef;
-    }
-    .stTabs [data-baseweb="tab"][aria-selected="true"] {
-        background-color: #4e73df;
-        color: white;
-    }
-    .metric-card {
-        background-color: white;
-        border-radius: 0.5rem;
-        padding: 1rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.12);
-    }
-    .stSlider > div > div > div > div {
-        color: #4e73df;
-    }
-    .stButton > button {
-        background-color: #4e73df;
-        color: white;
-        border-radius: 0.3rem;
-    }
-    </style>
+<style>
+    .metric-card {background-color: #f0f2f6; border-radius: 10px; padding: 15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);}
+    .stTabs [data-baseweb="tab-list"] {gap: 10px;}
+    .stTabs [data-baseweb="tab"] {height: 50px; white-space: pre-wrap; background-color: #ffffff; border-radius: 5px; box-shadow: 0px 2px 5px rgba(0,0,0,0.05);}
+    .stTabs [aria-selected="true"] {background-color: #4CAF50; color: white;}
+</style>
 """, unsafe_allow_html=True)
 
-# Tiêu đề và logo
-col1, col2 = st.columns([1, 5])
-with col1:
-    st.image("https://github.com/user-attachments/assets/f263bd14-23a4-4735-b082-1d10ade1bbb0", width=80)
-with col2:
-    st.title("🎯 Phân Tích Funnel Bán Hàng")
-
-# Hàm tải dữ liệu
+# ==========================================
+# 2. HÀM XỬ LÝ DỮ LIỆU THÔNG MINH
+# ==========================================
 @st.cache_data
-def load_data(file):
+def load_and_clean_data(file):
     try:
-        if file.name.endswith('.csv'):
-            df = pd.read_csv(file)
-        elif file.name.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(file)
-        else:
-            st.error("Vui lòng tải lên file CSV hoặc Excel.")
-            return None
-
-        df.columns = df.columns.str.strip()
-        date_columns = ["Ngày dự kiến kí HĐ", "Thời điểm tạo"]
-        for col in date_columns:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce')
-        if 'Tỉ lệ thắng' in df.columns:
-            df['Tỉ lệ thắng'] = df['Tỉ lệ thắng'].str.rstrip('%').astype('float') / 100
-        if 'Doanh thu dự kiến' in df.columns:
-            df['Doanh thu dự kiến'] = pd.to_numeric(df['Doanh thu dự kiến'], errors='coerce')
+        df = pd.read_excel(file)
+        
+        # 1. Chuẩn hóa tên cột (fix mọi lỗi viết hoa thường/dấu cách)
+        df.columns = df.columns.str.lower().str.strip()
+        
+        # Mapping tên cột từ file ảnh của bạn sang tên chuẩn code
+        rename_map = {
+            'ma_kh': 'ma_kh', 'mã kh': 'ma_kh',
+            'ten_khach_hang': 'ten_khach',
+            'ngay_mua_lan_dau': 'first_date',
+            'ngay_tao_dat_hen': 'trans_date',
+            'ma_bill': 'ma_bill', 'mã bill': 'ma_bill',
+            'dich_vu': 'dich_vu', 'dv': 'dich_vu',
+            'sp': 'sp',
+            'so_luong': 'so_luong', 'số lượng': 'so_luong',
+            'gia_ban': 'don_gia',
+            'doanh thu': 'doanh_thu', 'doanh_th': 'doanh_thu',
+            'loai_khach': 'segment', 'loại khách': 'segment'
+        }
+        df.rename(columns=rename_map, inplace=True)
+        
+        # 2. Xử lý dữ liệu
+        # Tạo cột Tên Hàng Hóa chung (Gộp SP và DV)
+        df['item_name'] = df['dich_vu'].fillna(df['sp']).fillna("Không xác định")
+        
+        # Xử lý thời gian
+        df['trans_date'] = pd.to_datetime(df['trans_date'], errors='coerce')
+        
+        # Trích xuất thêm thông tin thời gian để phân tích sâu
+        df['Day'] = df['trans_date'].dt.date
+        df['Hour'] = df['trans_date'].dt.hour
+        df['Weekday'] = df['trans_date'].dt.day_name()
+        
+        # Xử lý tiền tệ
+        df['doanh_thu'] = df['doanh_thu'].fillna(0)
+        # Nếu doanh thu = 0 mà có đơn giá, tự tính lại
+        mask_zero = df['doanh_thu'] == 0
+        df.loc[mask_zero, 'doanh_thu'] = df.loc[mask_zero, 'don_gia'] * df.loc[mask_zero, 'so_luong']
+        
         return df
     except Exception as e:
-        st.error(f"Lỗi khi đọc file: {str(e)}")
+        st.error(f"Lỗi xử lý file: {e}")
         return None
 
-# Hàm hiển thị bộ lọc
-def show_filters(df):
-    with st.sidebar.expander("🔍 Bộ Lọc", expanded=True):
-        filters = {}
-        
-        if "Thời điểm tạo" in df.columns:
-            min_date = df["Thời điểm tạo"].min().date()
-            max_date = df["Thời điểm tạo"].max().date()
-            date_range = st.date_input("Phạm vi thời gian:", value=(min_date, max_date))
-            if len(date_range) == 2:
-                filters["Thời điểm tạo"] = date_range
+# ==========================================
+# 3. GIAO DIỆN CHÍNH
+# ==========================================
 
-        if "Nhân viên kinh doanh" in df.columns:
-            filters["Nhân viên kinh doanh"] = st.multiselect(
-                "Nhân viên kinh doanh:", options=sorted(df["Nhân viên kinh doanh"].dropna().unique())
-            )
-        
-        if "Tỉnh/TP" in df.columns:
-            filters["Tỉnh/TP"] = st.multiselect(
-                "Tỉnh/TP:", options=sorted(df["Tỉnh/TP"].dropna().unique())
-            )
-
-        if "Doanh thu dự kiến" in df.columns:
-            min_revenue = int(df["Doanh thu dự kiến"].min())
-            max_revenue = int(df["Doanh thu dự kiến"].max())
-            use_slider = st.checkbox("Sử dụng Slider cho Khoảng doanh thu", value=True)
-            
-            if use_slider:
-                revenue_range = st.slider(
-                    "Khoảng doanh thu (VND):", min_revenue, max_revenue, (min_revenue, max_revenue),
-                    step=1000000, format="%d VND"
-                )
-                filters["Doanh thu dự kiến"] = revenue_range
-            else:
-                col1, col2 = st.columns(2)
-                with col1:
-                    min_val = st.number_input("Doanh thu tối thiểu (VND):", min_value=min_revenue, max_value=max_revenue, value=min_revenue, step=1000000)
-                with col2:
-                    max_val = st.number_input("Doanh thu tối đa (VND):", min_value=min_revenue, max_value=max_revenue, value=max_revenue, step=1000000)
-                filters["Doanh thu dự kiến"] = (min_val, max_val)
-
-    return apply_filters(df, filters)
-
-# Áp dụng bộ lọc
-def apply_filters(df, filters):
-    filtered_df = df.copy()
-    for column, values in filters.items():
-        if column == "Thời điểm tạo" and len(values) == 2:
-            start_date, end_date = values
-            filtered_df = filtered_df[
-                (filtered_df[column].dt.date >= start_date) & 
-                (filtered_df[column].dt.date <= end_date)
-            ]
-        elif column == "Doanh thu dự kiến" and len(values) == 2:
-            min_val, max_val = values
-            filtered_df = filtered_df[
-                (filtered_df[column] >= min_val) & 
-                (filtered_df[column] <= max_val)
-            ]
-        elif values:
-            filtered_df = filtered_df[filtered_df[column].isin(values)]
-    return filtered_df
-
-# Dashboard tổng quan
-def show_dashboard(df):
-    st.subheader("📊 Dashboard Tổng Quan")
-    col1, col2, col3 = st.columns(3)
+# --- SIDEBAR ---
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/2928/2928892.png", width=100)
+    st.title("Admin Control")
+    uploaded_file = st.file_uploader("📂 Upload File Excel Báo Cáo", type=["xlsx"])
     
-    with col1:
-        total_opps = len(df)
-        st.metric("Tổng cơ hội", f"{total_opps:,}", help="Số lượng cơ hội trong dữ liệu")
+    st.divider()
+    st.info("💡 Mẹo: File cần có cột 'Loai_Khach' đã được chuẩn hóa từ bước trước.")
+
+# --- MAIN CONTENT ---
+if uploaded_file:
+    df = load_and_clean_data(uploaded_file)
     
-    with col2:
-        total_revenue = df["Doanh thu dự kiến"].sum()
-        st.metric("Doanh thu dự kiến", f"{total_revenue:,.0f} VND", help="Tổng doanh thu dự kiến")
-    
-    with col3:
-        if "Tỉ lệ thắng" in df.columns:
-            avg_win_rate = df["Tỉ lệ thắng"].mean() * 100
-            st.metric("Tỉ lệ thắng TB", f"{avg_win_rate:.1f}%", help="Tỉ lệ thắng trung bình")
-
-    if "Giai đoạn" in df.columns:
-        stage_counts = df["Giai đoạn"].value_counts()
-        fig = px.funnel(stage_counts, x=stage_counts.values, y=stage_counts.index)
-        fig.update_layout(height=300, title="Funnel Mini")
-        st.plotly_chart(fig, use_container_width=True, key="dashboard_funnel_mini")
-
-# Phân tích Funnel
-def show_funnel_analysis(df):
-    if "Giai đoạn" not in df.columns:
-        st.warning("Dữ liệu không chứa cột 'Giai đoạn'.")
-        return
-    
-    st.subheader("🎯 Phân tích Funnel")
-    stage_data = df.groupby("Giai đoạn").agg({
-        "Tên cơ hội": "count",
-        "Doanh thu dự kiến": "sum",
-        "Tỉ lệ thắng": "mean"
-    }).rename(columns={"Tên cơ hội": "Số cơ hội"}).reset_index()
-
-    stage_data["Doanh thu dự kiến"] = stage_data["Doanh thu dự kiến"].apply(lambda x: f"{x:,.0f} VND")
-    stage_data["Tỉ lệ thắng"] = stage_data["Tỉ lệ thắng"].apply(lambda x: f"{x:.2%}")
-
-    fig = go.Figure(go.Funnel(
-        y=stage_data["Giai đoạn"],
-        x=stage_data["Số cơ hội"],
-        textinfo="value+percent initial",
-        marker={"color": "#4e73df"},
-        customdata=stage_data[["Doanh thu dự kiến", "Tỉ lệ thắng"]],
-        hovertemplate="Giai đoạn: %{y}<br>Số cơ hội: %{x}<br>Doanh thu dự kiến: %{customdata[0]}<br>Tỉ lệ thắng: %{customdata[1]}"
-    ))
-    fig.update_layout(title="Phân tích Funnel theo Giai đoạn")
-    st.plotly_chart(fig, use_container_width=True, key="funnel_analysis_chart")
-
-    st.subheader("Chi tiết các cơ hội ở mỗi giai đoạn")
-    for stage in stage_data["Giai đoạn"]:
-        stage_opps = df[df["Giai đoạn"] == stage]
-        with st.expander(f"{stage} - {stage_data[stage_data['Giai đoạn'] == stage]['Số cơ hội'].values[0]} cơ hội"):
-            st.dataframe(stage_opps[["Tên cơ hội", "Doanh thu dự kiến", "Tỉ lệ thắng", "Nhân viên kinh doanh"]])
-
-# Phân tích theo nhân viên kinh doanh
-def show_salesperson_analysis(df):
-    if "Nhân viên kinh doanh" not in df.columns:
-        st.warning("Dữ liệu không chứa cột 'Nhân viên kinh doanh'.")
-        return
-    
-    st.subheader("📈 Phân tích theo Nhân viên Kinh doanh")
-    salesperson_data = df.groupby("Nhân viên kinh doanh").agg({
-        "Doanh thu dự kiến": "sum",
-        "Tỉ lệ thắng": "mean",
-        "Giai đoạn": "count"
-    }).rename(columns={"Giai đoạn": "Số cơ hội"}).reset_index()
-
-    fig1 = px.bar(
-        salesperson_data, x="Nhân viên kinh doanh", y="Doanh thu dự kiến",
-        title="Doanh thu dự kiến theo nhân viên", text_auto=".2s", color_discrete_sequence=["#4e73df"]
-    )
-    st.plotly_chart(fig1, use_container_width=True, key="salesperson_analysis_revenue")
-
-    fig2 = px.bar(
-        salesperson_data, x="Nhân viên kinh doanh", y="Số cơ hội",
-        title="Số cơ hội theo nhân viên", color_discrete_sequence=["#36b9cc"]
-    )
-    st.plotly_chart(fig2, use_container_width=True, key="salesperson_analysis_opportunities")
-
-# Phân tích theo khu vực địa lý
-def show_area_analysis(df):
-    if "Tỉnh/TP" not in df.columns:
-        st.warning("Dữ liệu không chứa cột 'Tỉnh/TP'.")
-        return
-    
-    st.subheader("🌍 Phân tích theo Khu vực")
-    area_data = df.groupby("Tỉnh/TP").agg({
-        "Doanh thu dự kiến": "sum",
-        "Tỉ lệ thắng": "mean",
-        "Giai đoạn": "count"
-    }).rename(columns={"Giai đoạn": "Số cơ hội"}).reset_index()
-
-    fig1 = px.bar(
-        area_data, x="Tỉnh/TP", y="Doanh thu dự kiến",
-        title="Doanh thu dự kiến theo khu vực", text_auto=".2s", color_discrete_sequence=["#1cc88a"]
-    )
-    st.plotly_chart(fig1, use_container_width=True, key="area_analysis_revenue")
-
-    fig2 = px.bar(
-        area_data, x="Tỉnh/TP", y="Số cơ hội",
-        title="Số cơ hội theo khu vực", color_discrete_sequence=["#f6c23e"]
-    )
-    st.plotly_chart(fig2, use_container_width=True, key="area_analysis_opportunities")
-
-# Phân tích theo ngành hàng
-def show_industry_analysis(df):
-    if "Ngành hàng" not in df.columns:
-        st.warning("Dữ liệu không chứa cột 'Ngành hàng'.")
-        return
-    
-    st.subheader("🏭 Phân tích theo Ngành hàng")
-    industry_data = df.groupby("Ngành hàng").agg({
-        "Doanh thu dự kiến": "sum",
-        "Giai đoạn": "count"
-    }).rename(columns={"Giai đoạn": "Số cơ hội"}).reset_index()
-
-    fig1 = px.pie(industry_data, values="Doanh thu dự kiến", names="Ngành hàng", title="Doanh thu dự kiến theo ngành hàng")
-    st.plotly_chart(fig1, use_container_width=True, key="industry_analysis_revenue")
-
-    fig2 = px.bar(industry_data, x="Ngành hàng", y="Số cơ hội", title="Số cơ hội theo ngành hàng", color_discrete_sequence=["#f6c23e"])
-    st.plotly_chart(fig2, use_container_width=True, key="industry_analysis_opportunities")
-
-# Phân tích chu kỳ bán hàng
-def show_sales_cycle_analysis(df):
-    if "Thời điểm tạo" not in df.columns or "Ngày dự kiến kí HĐ" not in df.columns:
-        st.warning("Dữ liệu không chứa cột 'Thời điểm tạo' hoặc 'Ngày dự kiến kí HĐ'.")
-        return
-    
-    st.subheader("⏳ Phân tích Chu kỳ Bán hàng")
-    df["Thời gian chuyển đổi (ngày)"] = (df["Ngày dự kiến kí HĐ"] - df["Thời điểm tạo"]).dt.days
-    cycle_data = df.groupby("Giai đoạn")["Thời gian chuyển đổi (ngày)"].mean().reset_index()
-
-    fig = px.bar(cycle_data, x="Giai đoạn", y="Thời gian chuyển đổi (ngày)", title="Thời gian trung bình giữa các giai đoạn (ngày)", color_discrete_sequence=["#1cc88a"])
-    st.plotly_chart(fig, use_container_width=True, key="sales_cycle_analysis_chart")
-
-# Các hàm phân tích bổ sung
-def show_revenue_by_stage(df):
-    try:
-        if 'Giai đoạn' in df.columns and 'Doanh thu dự kiến' in df.columns:
-            fig = px.box(df, x="Giai đoạn", y="Doanh thu dự kiến", title="Phân bố doanh thu dự kiến theo giai đoạn")
-            st.plotly_chart(fig, use_container_width=True, key="revenue_by_stage_chart")
-    except Exception as e:
-        st.error(f"Lỗi khi tạo biểu đồ phân bố doanh thu: {str(e)}")
-
-def show_opportunities_by_customer(df):
-    try:
-        customer_opportunities = df['Tên khách hàng'].value_counts().reset_index()
-        customer_opportunities.columns = ['Tên khách hàng', 'Số cơ hội']
-        
-        fig = px.bar(customer_opportunities, x='Tên khách hàng', y='Số cơ hội', title="Số cơ hội theo khách hàng")
-        st.plotly_chart(fig, use_container_width=True, key="opportunities_by_customer_chart")
-    except Exception as e:
-        st.error(f"Lỗi khi tạo biểu đồ số cơ hội theo khách hàng: {str(e)}")
-
-def show_revenue_by_region(df):
-    try:
-        if 'Tỉnh/TP' in df.columns and 'Doanh thu dự kiến' in df.columns:
-            revenue_by_region = df.groupby('Tỉnh/TP')['Doanh thu dự kiến'].sum().reset_index()
-            
-            fig = px.bar(revenue_by_region, x='Tỉnh/TP', y='Doanh thu dự kiến', title="Doanh thu dự kiến theo vùng")
-            st.plotly_chart(fig, use_container_width=True, key="revenue_by_region_chart")
-    except Exception as e:
-        st.error(f"Lỗi khi tạo biểu đồ doanh thu theo vùng: {str(e)}")
-
-def show_revenue_by_product(df):
-    try:
-        if 'Ngành hàng' in df.columns and 'Doanh thu dự kiến' in df.columns:
-            revenue_by_product = df.groupby('Ngành hàng')['Doanh thu dự kiến'].sum().reset_index()
-            
-            fig = px.pie(revenue_by_product, names='Ngành hàng', values='Doanh thu dự kiến', title="Doanh thu dự kiến theo ngành hàng")
-            st.plotly_chart(fig, use_container_width=True, key="revenue_by_product_chart")
-    except Exception as e:
-        st.error(f"Lỗi khi tạo biểu đồ doanh thu theo ngành hàng: {str(e)}")
-
-def show_conversion_rate_by_stage(df):
-    try:
-        if 'Giai đoạn' in df.columns:
-            conversion_rate_by_stage = df.groupby('Giai đoạn')['Tỉ lệ thắng'].mean().reset_index()
-            
-            fig = px.bar(conversion_rate_by_stage, x='Giai đoạn', y='Tỉ lệ thắng', title="Tỉ lệ chuyển đổi theo giai đoạn")
-            st.plotly_chart(fig, use_container_width=True, key="conversion_rate_by_stage_chart")
-    except Exception as e:
-        st.error(f"Lỗi khi tạo biểu đồ tỉ lệ chuyển đổi theo giai đoạn: {str(e)}")
-
-def show_opportunities_by_industry(df):
-    try:
-        if 'Ngành hàng' in df.columns:
-            opportunities_by_industry = df['Ngành hàng'].value_counts().reset_index()
-            opportunities_by_industry.columns = ['Ngành hàng', 'Số cơ hội']
-            
-            fig = px.bar(opportunities_by_industry, x='Ngành hàng', y='Số cơ hội', title="Số cơ hội theo ngành hàng")
-            st.plotly_chart(fig, use_container_width=True, key="opportunities_by_industry_chart")
-    except Exception as e:
-        st.error(f"Lỗi khi tạo biểu đồ số cơ hội theo ngành hàng: {str(e)}")
-
-# Hàm hiển thị dữ liệu chi tiết và xuất dữ liệu
-def show_detailed_data(df):
-    st.subheader("📋 Dữ liệu chi tiết")
-    st.dataframe(df.style.format({"Doanh thu dự kiến": "{:,.0f}", "Tỉ lệ thắng": "{:.1f}%"}))
-    
-    csv = df.to_csv(index=False)
-    st.download_button(
-        label="Export to CSV",
-        data=csv,
-        file_name="funnel_data.csv",
-        mime="text/csv",
-        key="download-csv"
-    )
-
-    try:
-        output = BytesIO()
-        writer = pd.ExcelWriter(output, engine='xlsxwriter')
-        df.to_excel(writer, index=False, sheet_name='Sheet1')
-        writer.close()
-        excel_data = output.getvalue()
-        st.download_button(
-            label="Export to Excel",
-            data=excel_data,
-            file_name="funnel_data.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download-excel"
-        )
-    except Exception as e:
-        st.warning("Không thể xuất dữ liệu sang Excel. Vui lòng cài đặt thư viện xlsxwriter hoặc kiểm tra lỗi: " + str(e))
-
-# Main
-file = st.sidebar.file_uploader("Tải file dữ liệu (CSV/Excel)", type=["csv", "xlsx"])
-if file:
-    df = load_data(file)
     if df is not None:
-        filtered_df = show_filters(df)
+        # --- TITLE & KPI ---
+        st.title("📊 Dashboard Phân Tích Chuyên Sâu T12/2025")
+        st.markdown(f"*Dữ liệu cập nhật đến: {df['trans_date'].max().strftime('%d/%m/%Y')}*")
+        
+        # TÍNH TOÁN KPI
+        total_rev = df['doanh_thu'].sum()
+        total_orders = df['ma_bill'].nunique()
+        total_customers = df['ma_kh'].nunique()
+        aov = total_rev / total_orders if total_orders else 0
+        
+        # Hiển thị KPI Cards
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        kpi1.metric("💰 Tổng Doanh Thu", f"{total_rev:,.0f} đ", delta_color="normal")
+        kpi2.metric("🧾 Tổng Đơn Hàng", f"{total_orders}", delta="Transactions")
+        kpi3.metric("👥 Tổng Khách", f"{total_customers}", delta="Unique Users")
+        kpi4.metric("🏷️ Giá Trị TB/Đơn (AOV)", f"{aov:,.0f} đ", help="Trung bình 1 bill khách trả bao nhiêu")
+        
+        st.divider()
 
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
-            "Tổng quan", "Funnel", "Nhân viên", "Khu vực", "Ngành hàng", "Chu kỳ bán hàng",
-            "Doanh thu theo giai đoạn", "Cơ hội theo khách hàng", "Doanh thu theo vùng",
-            "Doanh thu theo ngành", "Tỉ lệ chuyển đổi", "Dữ liệu chi tiết"
+        # --- TABS PHÂN TÍCH ---
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "📈 1. Sức Khỏe Tài Chính", 
+            "👥 2. Chân Dung Khách Hàng", 
+            "🛍️ 3. Sản Phẩm & Combo",
+            "⏰ 4. Xu Hướng & Vận Hành"
         ])
-        
+
+        # =================================================
+        # TAB 1: SỨC KHỎE TÀI CHÍNH (FINANCIAL HEALTH)
+        # =================================================
         with tab1:
-            show_dashboard(filtered_df)
-        
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                # 1. Biểu đồ đường: Doanh thu theo ngày (Tách màu Old/New)
+                daily_trend = df.groupby(['Day', 'segment'])['doanh_thu'].sum().reset_index()
+                fig_trend = px.line(daily_trend, x='Day', y='doanh_thu', color='segment',
+                                    title='🔥 Diễn Biến Doanh Thu Theo Ngày (Real-time Trend)',
+                                    labels={'doanh_thu': 'Doanh Thu', 'Day': 'Ngày', 'segment': 'Loại Khách'},
+                                    color_discrete_map={'Khách Cũ': '#2E86C1', 'Khách Mới': '#E74C3C'},
+                                    markers=True)
+                fig_trend.update_layout(hovermode="x unified")
+                st.plotly_chart(fig_trend, use_container_width=True)
+            
+            with col2:
+                # 2. Donut Chart: Tỷ trọng đóng góp
+                rev_share = df.groupby('segment')['doanh_thu'].sum().reset_index()
+                fig_pie = px.pie(rev_share, values='doanh_thu', names='segment', hole=0.4,
+                                 title='💰 Ai đang nuôi sống Spa?',
+                                 color='segment',
+                                 color_discrete_map={'Khách Cũ': '#2E86C1', 'Khách Mới': '#E74C3C'})
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+            # 3. Phân tích AOV (Average Order Value)
+            st.subheader("💸 Phân tích độ 'Chịu Chi' (AOV Analysis)")
+            bill_values = df.groupby(['ma_bill', 'segment'])['doanh_thu'].sum().reset_index()
+            
+            fig_box = px.box(bill_values, x='segment', y='doanh_thu', color='segment',
+                             title='So sánh giá trị đơn hàng trung bình (Box Plot)',
+                             points="all", # Hiện tất cả các điểm để thấy khách VIP
+                             color_discrete_map={'Khách Cũ': '#2E86C1', 'Khách Mới': '#E74C3C'},
+                             labels={'doanh_thu': 'Giá trị đơn hàng'})
+            st.plotly_chart(fig_box, use_container_width=True)
+            st.caption("ℹ️ *Biểu đồ Box Plot giúp bạn thấy khách Mới hay Cũ chịu chi hơn. Các điểm chấm phía trên cao là những đơn hàng 'khủng' (Outliers).*")
+
+        # =================================================
+        # TAB 2: CHÂN DUNG KHÁCH HÀNG (CUSTOMER INSIGHTS)
+        # =================================================
         with tab2:
-            show_funnel_analysis(filtered_df)
-        
+            col_cust1, col_cust2 = st.columns(2)
+            
+            with col_cust1:
+                # 1. Tần suất mua hàng (Frequency)
+                st.subheader("🔄 Độ Trung Thành (Tần Suất Quay Lại)")
+                freq = df.groupby(['ma_kh', 'segment'])['ma_bill'].nunique().reset_index()
+                # Phân nhóm tần suất
+                freq['Frequency_Group'] = pd.cut(freq['ma_bill'], 
+                                               bins=[0, 1, 2, 5, 100], 
+                                               labels=['1 lần (Vãng lai)', '2 lần (Tiềm năng)', '3-5 lần (Thân thiết)', '>5 lần (VIP Ruột)'])
+                
+                fig_freq = px.histogram(freq, x='Frequency_Group', color='segment', barmode='group',
+                                      title='Phân bổ tần suất mua hàng trong tháng',
+                                      color_discrete_map={'Khách Cũ': '#2E86C1', 'Khách Mới': '#E74C3C'})
+                st.plotly_chart(fig_freq, use_container_width=True)
+
+            with col_cust2:
+                # 2. Top Khách Hàng (Pareto)
+                st.subheader("🏆 Bảng Vàng Khách VIP (Top Contributors)")
+                top_customers = df.groupby(['ten_khach', 'segment'])['doanh_thu'].sum().reset_index().sort_values('doanh_thu', ascending=False).head(10)
+                
+                fig_bar_cust = px.bar(top_customers, x='doanh_thu', y='ten_khach', orientation='h', color='segment',
+                                    title='Top 10 Khách chi tiêu cao nhất',
+                                    color_discrete_map={'Khách Cũ': '#2E86C1', 'Khách Mới': '#E74C3C'},
+                                    text_auto='.2s')
+                fig_bar_cust.update_layout(yaxis={'categoryorder':'total ascending'})
+                st.plotly_chart(fig_bar_cust, use_container_width=True)
+
+        # =================================================
+        # TAB 3: SẢN PHẨM & COMBO (PRODUCT PERFORMANCE)
+        # =================================================
         with tab3:
-            show_salesperson_analysis(filtered_df)
-        
+            st.subheader("🛍️ Ma Trận Sản Phẩm (BCG Matrix Simualtion)")
+            
+            # Tính metrics cho từng sản phẩm
+            prod_perf = df.groupby('item_name').agg(
+                Revenue=('doanh_thu', 'sum'),
+                Quantity=('so_luong', 'sum'),
+                Unique_Buyers=('ma_kh', 'nunique')
+            ).reset_index()
+            
+            # Scatter Plot: Doanh thu vs Số người mua
+            fig_scatter = px.scatter(prod_perf, x='Unique_Buyers', y='Revenue', 
+                                   size='Quantity', color='Revenue',
+                                   hover_name='item_name',
+                                   title='Phân loại sản phẩm: Bò Sữa (Doanh thu cao) vs Mồi Câu (Nhiều người mua)',
+                                   labels={'Unique_Buyers': 'Số người mua (Độ phổ biến)', 'Revenue': 'Tổng Doanh Thu'},
+                                   color_continuous_scale='Viridis')
+            # Thêm đường trung bình để chia 4 góc phần tư
+            fig_scatter.add_vline(x=prod_perf['Unique_Buyers'].mean(), line_dash="dash", line_color="green")
+            fig_scatter.add_hline(y=prod_perf['Revenue'].mean(), line_dash="dash", line_color="green")
+            
+            st.plotly_chart(fig_scatter, use_container_width=True)
+            
+            st.markdown("""
+            * **Góc trên phải (Cao tiền, Đông khách):** Sản phẩm Ngôi Sao (Cần duy trì).
+            * **Góc dưới phải (Thấp tiền, Đông khách):** Sản phẩm Mồi Câu (Dùng để hút khách mới).
+            * **Góc trên trái (Cao tiền, Ít khách):** Sản phẩm Cao Cấp (Dành cho VIP).
+            """)
+            
+            st.divider()
+            
+            # Hero Product cho Khách Mới
+            st.subheader("👶 Hero Product: Khách Mới thường mua gì đầu tiên?")
+            new_cust_prod = df[df['segment']=='Khách Mới'].groupby('item_name')['ma_kh'].nunique().sort_values(ascending=False).head(10).reset_index()
+            fig_hero = px.bar(new_cust_prod, x='item_name', y='ma_kh',
+                            title='Top Dịch vụ thu hút Khách Mới nhất',
+                            color_discrete_sequence=['#E74C3C'])
+            st.plotly_chart(fig_hero, use_container_width=True)
+
+        # =================================================
+        # TAB 4: VẬN HÀNH & THỜI GIAN (OPERATIONAL)
+        # =================================================
         with tab4:
-            show_area_analysis(filtered_df)
-        
-        with tab5:
-            show_industry_analysis(filtered_df)
-        
-        with tab6:
-            show_sales_cycle_analysis(filtered_df)
-        
-        with tab7:
-            show_revenue_by_stage(filtered_df)
-        
-        with tab8:
-            show_opportunities_by_customer(filtered_df)
-        
-        with tab9:
-            show_revenue_by_region(filtered_df)
-        
-        with tab10:
-            show_revenue_by_product(filtered_df)
-        
-        with tab11:
-            show_conversion_rate_by_stage(filtered_df)
-        
-        with tab12:
-            show_detailed_data(filtered_df)
+            col_time1, col_time2 = st.columns(2)
+            
+            with col_time1:
+                # Heatmap: Giờ cao điểm
+                st.subheader("🔥 Khung Giờ Vàng (Peak Hours)")
+                hourly_sales = df.groupby('Hour')['ma_bill'].nunique().reset_index()
+                fig_area = px.area(hourly_sales, x='Hour', y='ma_bill',
+                                 title='Mật độ đơn hàng theo khung giờ',
+                                 labels={'Hour': 'Giờ trong ngày', 'ma_bill': 'Số lượng đơn'})
+                st.plotly_chart(fig_area, use_container_width=True)
+            
+            with col_time2:
+                # Doanh thu theo thứ trong tuần
+                st.subheader("📅 Hiệu quả các ngày trong tuần")
+                # Sắp xếp thứ tự
+                days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                weekday_sales = df.groupby('Weekday')['doanh_thu'].sum().reindex(days_order).reset_index()
+                
+                fig_bar_week = px.bar(weekday_sales, x='Weekday', y='doanh_thu',
+                                    title='Doanh thu theo thứ (Weekday Analysis)',
+                                    color='doanh_thu', color_continuous_scale='Blues')
+                st.plotly_chart(fig_bar_week, use_container_width=True)
+
+else:
+    # Màn hình chờ
+    st.info("👋 Xin chào! Vui lòng upload file Excel 'Bao_Cao_Thang_12_Final.xlsx' ở cột bên trái để bắt đầu phân tích.")
+    st.write("---")
+    st.image("https://media.giphy.com/media/L1R1TVTh2RhtR5Jgww/giphy.gif", width=300)
