@@ -192,6 +192,7 @@ def parse_hoan_hang(all_sheets):
 
 @st.cache_data
 def load_and_parse(file_bytes, filename):
+    """Parse 1 file Excel, trả về (all_data, sl_data, hoan_data, available_sans, sheet_names)."""
     buf = io.BytesIO(file_bytes)
     all_sheets = pd.read_excel(buf, sheet_name=None, header=None)
 
@@ -209,24 +210,59 @@ def load_and_parse(file_bytes, filename):
     for label, sheet_name in san_map.items():
         df = parse_sales_sheet(all_sheets[sheet_name], label)
         if len(df) > 0:
+            df['Ky_bao_cao'] = filename   # gắn nhãn kỳ báo cáo
             frames.append(df)
 
     all_data = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     sl_data = parse_sl_sheet(all_sheets)
+    if len(sl_data) > 0:
+        sl_data['Ky_bao_cao'] = filename
     hoan_data = parse_hoan_hang(all_sheets)
+    if len(hoan_data) > 0:
+        hoan_data['Ky_bao_cao'] = filename
 
     return all_data, sl_data, hoan_data, list(san_map.keys()), list(all_sheets.keys())
 
 
+def load_multiple_files(uploaded_files):
+    """Merge nhiều file Excel thành 1 bộ dữ liệu tổng hợp."""
+    all_data_list, sl_list, hoan_list = [], [], []
+    all_sans = set()
+    all_sheets_names = []
+    errors = []
+
+    for uf in uploaded_files:
+        try:
+            fb = uf.read()
+            d, s, h, sans, snames = load_and_parse(fb, uf.name)
+            if len(d) > 0:
+                all_data_list.append(d)
+                all_sans.update(sans)
+            if len(s) > 0:
+                sl_list.append(s)
+            if len(h) > 0:
+                hoan_list.append(h)
+            all_sheets_names.extend(snames)
+        except Exception as e:
+            errors.append(f"❌ {uf.name}: {e}")
+
+    all_data  = pd.concat(all_data_list,  ignore_index=True) if all_data_list  else pd.DataFrame()
+    sl_data   = pd.concat(sl_list,        ignore_index=True) if sl_list        else pd.DataFrame()
+    hoan_data = pd.concat(hoan_list,      ignore_index=True) if hoan_list      else pd.DataFrame()
+
+    return all_data, sl_data, hoan_data, sorted(all_sans), all_sheets_names, errors
+
+
 # ══════════════════════════════════════════════════════════════════════
-# SIDEBAR – FILE UPLOAD
+# SIDEBAR – FILE UPLOAD (multi-file)
 # ══════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("### 📂 Tải lên dữ liệu")
-    uploaded = st.file_uploader(
+    uploaded_files = st.file_uploader(
         "Kéo thả file Excel vào đây",
         type=["xlsx", "xls"],
-        help="File Excel báo cáo TMĐT có các sheet TiktokShop, Shopee, Lazada..."
+        accept_multiple_files=True,
+        help="Tải nhiều file cùng lúc — mỗi file 1 kỳ báo cáo, dữ liệu sẽ được gộp lại."
     )
     st.markdown("---")
 
@@ -234,7 +270,7 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════
 # LANDING PAGE
 # ══════════════════════════════════════════════════════════════════════
-if not uploaded:
+if not uploaded_files:
     st.markdown("""
     <div class="upload-zone">
         <div style="font-size:4rem; margin-bottom:20px">📊</div>
@@ -270,17 +306,23 @@ if not uploaded:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# LOAD DATA
+# LOAD DATA (multi-file)
 # ══════════════════════════════════════════════════════════════════════
-file_bytes = uploaded.read()
 with st.spinner("⏳ Đang đọc và phân tích dữ liệu..."):
-    all_data, sl_data, hoan_data, available_sans, all_sheet_names = load_and_parse(file_bytes, uploaded.name)
+    all_data, sl_data, hoan_data, available_sans, all_sheet_names, load_errors = load_multiple_files(uploaded_files)
+
+for err in load_errors:
+    st.warning(err)
 
 if len(all_data) == 0:
     st.error("❌ Không tìm thấy dữ liệu giao dịch. Kiểm tra xem file có sheet TiktokShop/Shopee/Lazada không.")
     with st.expander("📋 Sheets tìm thấy trong file"):
         st.write(all_sheet_names)
     st.stop()
+
+# Danh sách kỳ báo cáo (tên file) để dùng trong filter
+all_ky = sorted(all_data['Ky_bao_cao'].unique().tolist()) if 'Ky_bao_cao' in all_data.columns else []
+file_label = f"{len(uploaded_files)} file" if len(uploaded_files) > 1 else uploaded_files[0].name
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -314,14 +356,28 @@ with st.sidebar:
                       and str(b).strip() not in ['', 'nan', 'Thương hiệu']]
     brand_filter = st.multiselect("🏷️ Thương hiệu", options=all_brands) if all_brands else []
 
+    # Filter theo kỳ báo cáo (chỉ hiện khi có nhiều file)
+    if len(all_ky) > 1:
+        ky_filter = st.multiselect("📅 Kỳ báo cáo", options=all_ky, default=all_ky,
+                                   help="Chọn 1 hoặc nhiều tháng/kỳ để so sánh")
+    else:
+        ky_filter = all_ky
+
     st.markdown("---")
-    st.success(f"✅ {uploaded.name}")
+    for fn in uploaded_files:
+        st.success(f"✅ {fn.name}")
     st.caption(f"Sàn: {', '.join(available_sans)}")
     st.caption(f"Tổng: {len(all_data):,} dòng SP")
 
 
 # ─── Apply Filters ─────────────────────────────────────────────────────
-filtered = all_data[all_data['San'].isin(san_filter)] if san_filter else all_data.copy()
+filtered = all_data.copy()
+# Filter kỳ báo cáo
+if ky_filter and 'Ky_bao_cao' in filtered.columns:
+    filtered = filtered[filtered['Ky_bao_cao'].isin(ky_filter)]
+# Filter sàn
+if san_filter:
+    filtered = filtered[filtered['San'].isin(san_filter)]
 if not include_tang:
     filtered = filtered[~filtered['La_hang_tang']]
 if not (show_profit and show_loss):
@@ -343,7 +399,7 @@ st.markdown(f"""
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
     <div>
       <h2>🛍️ Phân Tích Doanh Số Bán Hàng Online</h2>
-      <p>📁 {uploaded.name} &nbsp;|&nbsp; Sàn: {" · ".join(san_filter if san_filter else ["—"])}
+      <p>📁 {file_label} &nbsp;|&nbsp; Sàn: {" · ".join(san_filter if san_filter else ["—"])}
          &nbsp;|&nbsp; {"Có hàng tặng" if include_tang else "Không tính hàng tặng"}</p>
     </div>
     <div style="opacity:0.6;font-size:0.8rem;text-align:right">
@@ -795,7 +851,7 @@ with tab5:
     csv_buf = det.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
     st.download_button(
         "⬇️ Tải CSV (theo bộ lọc hiện tại)", data=csv_buf,
-        file_name=f"tmdt_{uploaded.name.replace('.xlsx','')}_filtered.csv",
+        file_name="tmdt_export_filtered.csv",
         mime='text/csv'
     )
 
@@ -824,7 +880,7 @@ st.markdown("---")
 st.markdown(f"""
 <div style="text-align:center;color:#94a3b8;font-size:0.78rem;padding:10px 0">
     📊 Phân tích TMĐT Online &nbsp;|&nbsp;
-    <code>{uploaded.name}</code> &nbsp;|&nbsp;
+    <code>{file_label}</code> &nbsp;|&nbsp;
     Sàn: {" · ".join(available_sans)} &nbsp;|&nbsp;
     {len(all_data):,} giao dịch được phân tích
 </div>""", unsafe_allow_html=True)
