@@ -113,7 +113,13 @@ def parse_sales_sheet(df_raw, san_label):
     cols = {k: v for k, v in col_map.items() if k < len(data.columns)}
     df = data[list(cols.keys())].copy()
     df.columns = list(cols.values())
-    df = df[df['Ten_hang_hoa'].notna() & (df['Ten_hang_hoa'].astype(str).str.strip() != '') & (df['Ten_hang_hoa'].astype(str) != 'nan')]
+    # FIX BUG 3: lọc bỏ junk rows (tên hàng quá ngắn như backtick, khoảng trắng)
+    df = df[
+        df['Ten_hang_hoa'].notna() &
+        (df['Ten_hang_hoa'].astype(str).str.strip() != '') &
+        (df['Ten_hang_hoa'].astype(str) != 'nan') &
+        (df['Ten_hang_hoa'].astype(str).str.strip().str.len() > 2)
+    ]
     df['San'] = san_label
     df['La_hang_tang'] = df['Ma_san_pham'].astype(str).str.endswith('-T', na=False)
     for col in ['So_luong', 'Gia_von', 'Tong_gia_von', 'Tien_ve_TK', 'Loi_nhuan']:
@@ -137,12 +143,18 @@ def parse_sl_sheet(all_sheets):
     sl = sl.rename(columns={k: v for k, v in rename.items() if k < len(sl.columns)})
     if 'Ten_hang' not in sl.columns:
         return pd.DataFrame()
-    sl = sl[sl['Ten_hang'].notna() & (sl['Ten_hang'].astype(str).str.strip() != '')]
     sl['Tong_SL'] = pd.to_numeric(sl.get('Tong_SL', 0), errors='coerce').fillna(0)
     sl['Gia_von'] = pd.to_numeric(sl.get('Gia_von', 0), errors='coerce').fillna(0)
     for c in ['Tiktok', 'Shopee', 'Lazada']:
         if c in sl.columns:
             sl[c] = pd.to_numeric(sl[c], errors='coerce').fillna(0)
+    # FIX BUG 2: phải filter Ten_hang có giá trị TRƯỚC khi lọc Tong_SL > 0
+    # để loại bỏ các footer row tổng cuối sheet (có Tong_SL lớn nhưng Ten_hang = NaN)
+    sl = sl[
+        sl['Ten_hang'].notna() &
+        (sl['Ten_hang'].astype(str).str.strip() != '') &
+        (sl['Ten_hang'].astype(str) != 'nan')
+    ]
     sl = sl[sl['Tong_SL'] > 0]
     sl = sl[~sl['STT'].astype(str).str.upper().str.contains('TỔNG|TOTAL', na=False)]
     sl['La_hang_tang'] = sl['Ten_hang'].astype(str).str.contains('Hàng tặng|hàng tặng', na=False)
@@ -172,6 +184,8 @@ def parse_hoan_hang(all_sheets):
     df2 = df2[df2['Ten_hang'].notna() & (df2['Ten_hang'].astype(str).str.strip() != '')]
     df2['Tong_gia_von'] = pd.to_numeric(df2['Tong_gia_von'], errors='coerce').fillna(0)
     df2['So_luong'] = pd.to_numeric(df2['So_luong'], errors='coerce').fillna(0)
+    # Ffill cột Sàn vì sheet gộp nhiều sàn
+    df2['San'] = df2['San'].replace('', np.nan).ffill()
     df2 = df2[df2['Tong_gia_von'] > 0]
     return df2
 
@@ -291,8 +305,13 @@ with st.sidebar:
 
     all_brands = []
     if len(sl_data) > 0 and 'Thuong_hieu' in sl_data.columns:
-        brands = sl_data['Thuong_hieu'].dropna().unique().tolist()
-        all_brands = [b for b in brands if str(b).strip() not in ['', 'nan']]
+        # FIX: ffill thương hiệu trong SL sheet trước khi lấy unique
+        brands_series = sl_data['Thuong_hieu'].ffill()
+        brands = brands_series.dropna().unique().tolist()
+        # Loại bỏ tên sàn bị lọt vào cuối sheet
+        platform_names = {'tiktok shop', 'shopee', 'lazada', 'tiktokshop'}
+        all_brands = [b for b in brands if str(b).strip().lower() not in platform_names
+                      and str(b).strip() not in ['', 'nan', 'Thương hiệu']]
     brand_filter = st.multiselect("🏷️ Thương hiệu", options=all_brands) if all_brands else []
 
     st.markdown("---")
@@ -343,7 +362,12 @@ total_loi_nhuan = filtered['Loi_nhuan'].sum()
 total_sl        = filtered['So_luong'].sum()
 total_tang_cost = tang_items['Tong_gia_von'].sum()
 total_hoan      = hoan_data['Tong_gia_von'].sum() if len(hoan_data) > 0 else 0
-profit_margin   = (total_loi_nhuan / total_tien_ve * 100) if total_tien_ve != 0 else 0
+
+# FIX: tránh chia cho 0 hoặc Tien_ve_TK âm làm biên LN vô nghĩa
+if total_tien_ve > 0:
+    profit_margin = total_loi_nhuan / total_tien_ve * 100
+else:
+    profit_margin = 0.0
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 with c1: st.markdown(kpi_card("💰","Tiền Về TK",f"{total_tien_ve/1e6:.2f}M₫","Dự kiến nhận về","#3b82f6"), unsafe_allow_html=True)
@@ -385,7 +409,10 @@ with tab1:
         So_luong=('So_luong', 'sum'),
         So_dong=('Ten_hang_hoa', 'count')
     ).reset_index()
-    ps['Bien_LN'] = (ps['Loi_nhuan'] / ps['Tien_ve_TK'] * 100).round(1).fillna(0)
+    ps['Bien_LN'] = ps.apply(
+        lambda r: round(r['Loi_nhuan'] / r['Tien_ve_TK'] * 100, 1) if r['Tien_ve_TK'] > 0 else 0.0,
+        axis=1
+    )
 
     col1, col2 = st.columns(2)
     with col1:
@@ -536,7 +563,7 @@ with tab2:
     tang_pct = total_tang_cost / total_gia_von * 100 if total_gia_von > 0 else 0
     st.markdown(f"""
     <div class="insight insight-warn">
-    🎁 <b>Hàng tặng chiếm {tang_pct:.1f}%</b> tổng giá vốn (<b>{total_tang_cost:,.0f}₫</b>).
+    🎁 <b>Hàng tặng chiếm {tang_pct:.1f}%</b> tổng giá vốn hàng bán (<b>{total_tang_cost:,.0f}₫</b>).
     Chi phí ẩn này thường bị bỏ qua trong báo cáo — cần theo dõi chặt!
     </div>""", unsafe_allow_html=True)
 
@@ -576,12 +603,14 @@ with tab3:
         fig2.update_layout(height=460, **CHART_THEME, coloraxis_showscale=False)
         st.plotly_chart(fig2, use_container_width=True)
 
+    # ── WATERFALL ──────────────────────────────────────────────────────
     st.markdown('<div class="sec-title">🪣 Waterfall Dòng Tiền</div>', unsafe_allow_html=True)
-    tv   = filtered['Tien_ve_TK'].sum()
-    gv   = -filtered[~filtered['La_hang_tang']]['Tong_gia_von'].sum()
-    tg   = -tang_items['Tong_gia_von'].sum()
-    hv   = -total_hoan
-    net  = tv + gv + tg
+    tv  = filtered['Tien_ve_TK'].sum()
+    gv  = -filtered[~filtered['La_hang_tang']]['Tong_gia_von'].sum()
+    tg  = -tang_items['Tong_gia_von'].sum()
+    hv  = -total_hoan
+    # FIX BUG 1: net phải cộng đủ 4 thành phần, bao gồm cả hàng hoàn (hv)
+    net = tv + gv + tg + hv
 
     fig3 = go.Figure(go.Waterfall(
         measure=["absolute", "relative", "relative", "relative", "total"],
@@ -599,9 +628,19 @@ with tab3:
                        height=420, **CHART_THEME)
     st.plotly_chart(fig3, use_container_width=True)
 
+    # Ghi chú giải thích Lợi nhuận ròng vs Lợi nhuận KPI
+    st.markdown(f"""
+    <div class="insight insight-info">
+    ℹ️ <b>Lợi nhuận ròng ({net/1e6:.2f}M₫)</b> = Tiền về TK − Giá vốn hàng bán − Chi phí hàng tặng − Giá vốn hàng hoàn.
+    Khác với KPI "Lợi nhuận" ({total_loi_nhuan/1e6:.2f}M₫) vốn chỉ tính từ dữ liệu giao dịch, chưa trừ hoàn hàng.
+    </div>""", unsafe_allow_html=True)
+
     st.markdown('<div class="sec-title">📉 Ma Trận: Sản Lượng vs Lợi Nhuận</div>', unsafe_allow_html=True)
     sc = prod_real[prod_real['So_luong'] > 0].copy()
-    sc['Bien_LN'] = (sc['Loi_nhuan'] / sc['Tong_gia_von'] * 100).round(1)
+    sc['Bien_LN'] = sc.apply(
+        lambda r: round(r['Loi_nhuan'] / r['Tong_gia_von'] * 100, 1) if r['Tong_gia_von'] != 0 else 0.0,
+        axis=1
+    )
 
     fig4 = px.scatter(sc, x='So_luong', y='Loi_nhuan',
                       size=sc['Tong_gia_von'].clip(lower=1),
@@ -638,7 +677,7 @@ with tab4:
         c1, c2, c3 = st.columns(3)
         with c1: st.markdown(kpi_card("↩️","Dòng SP Hoàn",f"{len(hoan_data)}","Tổng dòng ghi nhận","#ef4444"), unsafe_allow_html=True)
         with c2: st.markdown(kpi_card("💸","Giá Vốn Bị Hoàn",f"{total_hoan/1e6:.2f}M₫","Tiền vốn đang bị treo","#f59e0b"), unsafe_allow_html=True)
-        with c3: st.markdown(kpi_card("📊","Tỷ Lệ / Giá Vốn",f"{hoan_pct:.1f}%","So với tổng giá vốn","#8b5cf6"), unsafe_allow_html=True)
+        with c3: st.markdown(kpi_card("📊","Tỷ Lệ / Giá Vốn",f"{hoan_pct:.1f}%","So với tổng giá vốn hàng bán","#8b5cf6"), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
         hoan_prod = hoan_data.groupby('Ten_hang')['Tong_gia_von'].sum().reset_index().sort_values('Tong_gia_von', ascending=False)
@@ -764,6 +803,9 @@ with tab5:
         st.markdown('<div class="sec-title">🏷️ Tổng Hợp Theo Thương Hiệu</div>', unsafe_allow_html=True)
         sl_b = sl_data.copy()
         sl_b['TH'] = sl_b['Thuong_hieu'].ffill()
+        # FIX: loại bỏ tên sàn bị lọt vào cột thương hiệu ở footer
+        platform_names = {'tiktok shop', 'shopee', 'lazada', 'tiktokshop'}
+        sl_b = sl_b[~sl_b['TH'].astype(str).str.strip().str.lower().isin(platform_names)]
         bs = sl_b[~sl_b['La_hang_tang']].groupby('TH').agg(
             So_SP=('Ten_hang', 'count'), Tong_SL=('Tong_SL', 'sum')
         ).reset_index().sort_values('Tong_SL', ascending=False).head(15)
