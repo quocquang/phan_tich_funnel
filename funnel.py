@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import io
+import re
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -77,6 +78,12 @@ html, body, [class*="css"], .stApp { font-family: 'Be Vietnam Pro', sans-serif !
     background: white; border-radius: 10px; padding: 10px 14px; margin: 5px 0;
     border-left: 4px solid; font-size: 0.83rem; box-shadow: 0 1px 6px rgba(0,0,0,0.06);
 }
+
+.month-badge {
+    display: inline-block; background: linear-gradient(135deg,#1a1a2e,#0f3460);
+    color: white; border-radius: 8px; padding: 3px 10px; font-size: 0.75rem;
+    font-weight: 700; margin: 2px 3px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -96,6 +103,84 @@ def kpi_card(icon, label, value, sub, color, badge_txt="", badge_color=""):
     </div>"""
 
 
+def extract_month_from_filename(filename):
+    """
+    Thử rút tháng/năm từ tên file.
+    Hỗ trợ các dạng: thang1, thang01, T1, T01, 2024-01, 01-2024,
+                     Jan2024, January2024, tháng 1, tháng1 ...
+    Trả về chuỗi "YYYY-MM" hoặc None.
+    """
+    name = filename.lower()
+
+    # Dạng YYYY-MM hoặc MM-YYYY hoặc YYYY_MM
+    m = re.search(r'(20\d{2})[-_\.]?(0[1-9]|1[0-2])', name)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    m = re.search(r'(0[1-9]|1[0-2])[-_\.](20\d{2})', name)
+    if m:
+        return f"{m.group(2)}-{m.group(1)}"
+
+    # Dạng thang01 / thang1 / tháng1
+    m = re.search(r'th[aá]ng\s*0?(\d{1,2})', name)
+    if m:
+        month = int(m.group(1))
+        if 1 <= month <= 12:
+            return f"2024-{month:02d}"   # giả năm 2024 nếu ko có
+
+    # Dạng T01 / T1
+    m = re.search(r'\bt0?(\d{1,2})\b', name)
+    if m:
+        month = int(m.group(1))
+        if 1 <= month <= 12:
+            return f"2024-{month:02d}"
+
+    # Dạng tháng bằng chữ tiếng Anh
+    month_map = {'jan':1,'feb':2,'mar':3,'apr':4,'may':5,'jun':6,
+                 'jul':7,'aug':8,'sep':9,'oct':10,'nov':11,'dec':12}
+    for abbr, num in month_map.items():
+        if abbr in name:
+            yr_m = re.search(r'(20\d{2})', name)
+            yr = yr_m.group(1) if yr_m else "2024"
+            return f"{yr}-{num:02d}"
+
+    return None
+
+
+def assign_month_label(df):
+    """
+    Thêm cột 'Thang_label' (YYYY-MM) vào dataframe all_data.
+    Ưu tiên: cột Ngay → fallback tên file.
+    """
+    labels = []
+    for _, row in df.iterrows():
+        # 1) Từ cột Ngay
+        if 'Ngay' in row and pd.notna(row['Ngay']):
+            try:
+                dt = pd.to_datetime(row['Ngay'])
+                labels.append(dt.strftime('%Y-%m'))
+                continue
+            except Exception:
+                pass
+        # 2) Từ tên file
+        if 'Ky_bao_cao' in row and pd.notna(row['Ky_bao_cao']):
+            ml = extract_month_from_filename(str(row['Ky_bao_cao']))
+            if ml:
+                labels.append(ml)
+                continue
+        labels.append(None)
+    df['Thang_label'] = labels
+    return df
+
+
+def fmt_thang(label):
+    """'2024-03' → 'T3/2024'"""
+    try:
+        y, m = label.split('-')
+        return f"T{int(m)}/{y}"
+    except Exception:
+        return label
+
+
 def parse_sales_sheet(df_raw, san_label):
     header_row = None
     for i, row in df_raw.iterrows():
@@ -113,7 +198,6 @@ def parse_sales_sheet(df_raw, san_label):
     cols = {k: v for k, v in col_map.items() if k < len(data.columns)}
     df = data[list(cols.keys())].copy()
     df.columns = list(cols.values())
-    # FIX BUG 3: lọc bỏ junk rows (tên hàng quá ngắn như backtick, khoảng trắng)
     df = df[
         df['Ten_hang_hoa'].notna() &
         (df['Ten_hang_hoa'].astype(str).str.strip() != '') &
@@ -148,8 +232,6 @@ def parse_sl_sheet(all_sheets):
     for c in ['Tiktok', 'Shopee', 'Lazada']:
         if c in sl.columns:
             sl[c] = pd.to_numeric(sl[c], errors='coerce').fillna(0)
-    # FIX BUG 2: phải filter Ten_hang có giá trị TRƯỚC khi lọc Tong_SL > 0
-    # để loại bỏ các footer row tổng cuối sheet (có Tong_SL lớn nhưng Ten_hang = NaN)
     sl = sl[
         sl['Ten_hang'].notna() &
         (sl['Ten_hang'].astype(str).str.strip() != '') &
@@ -184,7 +266,6 @@ def parse_hoan_hang(all_sheets):
     df2 = df2[df2['Ten_hang'].notna() & (df2['Ten_hang'].astype(str).str.strip() != '')]
     df2['Tong_gia_von'] = pd.to_numeric(df2['Tong_gia_von'], errors='coerce').fillna(0)
     df2['So_luong'] = pd.to_numeric(df2['So_luong'], errors='coerce').fillna(0)
-    # Ffill cột Sàn vì sheet gộp nhiều sàn
     df2['San'] = df2['San'].replace('', np.nan).ffill()
     df2 = df2[df2['Tong_gia_von'] > 0]
     return df2
@@ -192,7 +273,6 @@ def parse_hoan_hang(all_sheets):
 
 @st.cache_data
 def load_and_parse(file_bytes, filename):
-    """Parse 1 file Excel, trả về (all_data, sl_data, hoan_data, available_sans, sheet_names)."""
     buf = io.BytesIO(file_bytes)
     all_sheets = pd.read_excel(buf, sheet_name=None, header=None)
 
@@ -210,7 +290,7 @@ def load_and_parse(file_bytes, filename):
     for label, sheet_name in san_map.items():
         df = parse_sales_sheet(all_sheets[sheet_name], label)
         if len(df) > 0:
-            df['Ky_bao_cao'] = filename   # gắn nhãn kỳ báo cáo
+            df['Ky_bao_cao'] = filename
             frames.append(df)
 
     all_data = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -225,7 +305,6 @@ def load_and_parse(file_bytes, filename):
 
 
 def load_multiple_files(uploaded_files):
-    """Merge nhiều file Excel thành 1 bộ dữ liệu tổng hợp."""
     all_data_list, sl_list, hoan_list = [], [], []
     all_sans = set()
     all_sheets_names = []
@@ -250,11 +329,15 @@ def load_multiple_files(uploaded_files):
     sl_data   = pd.concat(sl_list,        ignore_index=True) if sl_list        else pd.DataFrame()
     hoan_data = pd.concat(hoan_list,      ignore_index=True) if hoan_list      else pd.DataFrame()
 
+    # ── Gán nhãn tháng ngay sau khi merge ──
+    if len(all_data) > 0:
+        all_data = assign_month_label(all_data)
+
     return all_data, sl_data, hoan_data, sorted(all_sans), all_sheets_names, errors
 
 
 # ══════════════════════════════════════════════════════════════════════
-# SIDEBAR – FILE UPLOAD (multi-file)
+# SIDEBAR – FILE UPLOAD
 # ══════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("### 📂 Tải lên dữ liệu")
@@ -306,7 +389,7 @@ if not uploaded_files:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# LOAD DATA (multi-file)
+# LOAD DATA
 # ══════════════════════════════════════════════════════════════════════
 with st.spinner("⏳ Đang đọc và phân tích dữ liệu..."):
     all_data, sl_data, hoan_data, available_sans, all_sheet_names, load_errors = load_multiple_files(uploaded_files)
@@ -320,9 +403,12 @@ if len(all_data) == 0:
         st.write(all_sheet_names)
     st.stop()
 
-# Danh sách kỳ báo cáo (tên file) để dùng trong filter
 all_ky = sorted(all_data['Ky_bao_cao'].unique().tolist()) if 'Ky_bao_cao' in all_data.columns else []
 file_label = f"{len(uploaded_files)} file" if len(uploaded_files) > 1 else uploaded_files[0].name
+
+# ── Danh sách tháng có trong dữ liệu ──
+all_months_raw = sorted([m for m in all_data['Thang_label'].dropna().unique().tolist()])
+all_months_fmt = {m: fmt_thang(m) for m in all_months_raw}   # "2024-03" → "T3/2024"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -334,6 +420,23 @@ with st.sidebar:
     san_filter = st.multiselect(
         "🏪 Sàn TMĐT", options=available_sans, default=available_sans
     )
+
+    # ── FILTER THÁNG (mới) ──────────────────────────────────────────
+    if all_months_raw:
+        month_options = [all_months_fmt[m] for m in all_months_raw]
+        month_sel_fmt = st.multiselect(
+            "📅 Tháng",
+            options=month_options,
+            default=month_options,
+            help="Chọn tháng cần xem. Tháng được nhận dạng từ cột Ngày hoặc tên file."
+        )
+        # Ánh xạ ngược "T3/2024" → "2024-03"
+        fmt_to_raw = {v: k for k, v in all_months_fmt.items()}
+        month_filter_raw = [fmt_to_raw[f] for f in month_sel_fmt if f in fmt_to_raw]
+    else:
+        month_filter_raw = []
+        st.caption("⚠️ Không nhận dạng được tháng từ dữ liệu.")
+
     include_tang = st.checkbox("🎁 Bao gồm hàng tặng", value=False)
 
     show_profit = st.checkbox("✅ Hiển thị hàng có lãi", value=True)
@@ -347,19 +450,16 @@ with st.sidebar:
 
     all_brands = []
     if len(sl_data) > 0 and 'Thuong_hieu' in sl_data.columns:
-        # FIX: ffill thương hiệu trong SL sheet trước khi lấy unique
         brands_series = sl_data['Thuong_hieu'].ffill()
         brands = brands_series.dropna().unique().tolist()
-        # Loại bỏ tên sàn bị lọt vào cuối sheet
         platform_names = {'tiktok shop', 'shopee', 'lazada', 'tiktokshop'}
         all_brands = [b for b in brands if str(b).strip().lower() not in platform_names
                       and str(b).strip() not in ['', 'nan', 'Thương hiệu']]
     brand_filter = st.multiselect("🏷️ Thương hiệu", options=all_brands) if all_brands else []
 
-    # Filter theo kỳ báo cáo (chỉ hiện khi có nhiều file)
     if len(all_ky) > 1:
-        ky_filter = st.multiselect("📅 Kỳ báo cáo", options=all_ky, default=all_ky,
-                                   help="Chọn 1 hoặc nhiều tháng/kỳ để so sánh")
+        ky_filter = st.multiselect("📁 Kỳ báo cáo (file)", options=all_ky, default=all_ky,
+                                   help="Lọc theo tên file nếu cần tách riêng.")
     else:
         ky_filter = all_ky
 
@@ -368,16 +468,23 @@ with st.sidebar:
         st.success(f"✅ {fn.name}")
     st.caption(f"Sàn: {', '.join(available_sans)}")
     st.caption(f"Tổng: {len(all_data):,} dòng SP")
+    if all_months_raw:
+        months_display = " · ".join([all_months_fmt[m] for m in all_months_raw])
+        st.caption(f"📅 Tháng: {months_display}")
 
 
-# ─── Apply Filters ─────────────────────────────────────────────────────
+# ─── Apply Filters ──────────────────────────────────────────────────
 filtered = all_data.copy()
-# Filter kỳ báo cáo
+
 if ky_filter and 'Ky_bao_cao' in filtered.columns:
     filtered = filtered[filtered['Ky_bao_cao'].isin(ky_filter)]
-# Filter sàn
 if san_filter:
     filtered = filtered[filtered['San'].isin(san_filter)]
+
+# ── Filter tháng (mới) ──
+if month_filter_raw and 'Thang_label' in filtered.columns:
+    filtered = filtered[filtered['Thang_label'].isin(month_filter_raw)]
+
 if not include_tang:
     filtered = filtered[~filtered['La_hang_tang']]
 if not (show_profit and show_loss):
@@ -388,18 +495,25 @@ if 'So_luong' in filtered.columns:
         filtered['So_luong'].between(sl_range[0], sl_range[1], inclusive='both') |
         filtered['So_luong'].isna()
     ]
-tang_items = all_data[all_data['La_hang_tang'] & all_data['San'].isin(san_filter if san_filter else available_sans)]
+
+tang_items = all_data[
+    all_data['La_hang_tang'] &
+    all_data['San'].isin(san_filter if san_filter else available_sans) &
+    (all_data['Thang_label'].isin(month_filter_raw) if month_filter_raw else True)
+]
 
 
 # ══════════════════════════════════════════════════════════════════════
 # HEADER
 # ══════════════════════════════════════════════════════════════════════
+active_months_str = " · ".join([all_months_fmt.get(m, m) for m in month_filter_raw]) if month_filter_raw else "Tất cả"
 st.markdown(f"""
 <div class="dash-header">
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
     <div>
       <h2>🛍️ Phân Tích Doanh Số Bán Hàng Online</h2>
       <p>📁 {file_label} &nbsp;|&nbsp; Sàn: {" · ".join(san_filter if san_filter else ["—"])}
+         &nbsp;|&nbsp; 📅 {active_months_str}
          &nbsp;|&nbsp; {"Có hàng tặng" if include_tang else "Không tính hàng tặng"}</p>
     </div>
     <div style="opacity:0.6;font-size:0.8rem;text-align:right">
@@ -419,11 +533,7 @@ total_sl        = filtered['So_luong'].sum()
 total_tang_cost = tang_items['Tong_gia_von'].sum()
 total_hoan      = hoan_data['Tong_gia_von'].sum() if len(hoan_data) > 0 else 0
 
-# FIX: tránh chia cho 0 hoặc Tien_ve_TK âm làm biên LN vô nghĩa
-if total_tien_ve > 0:
-    profit_margin = total_loi_nhuan / total_tien_ve * 100
-else:
-    profit_margin = 0.0
+profit_margin = total_loi_nhuan / total_tien_ve * 100 if total_tien_ve > 0 else 0.0
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 with c1: st.markdown(kpi_card("💰","Tiền Về TK",f"{total_tien_ve/1e6:.2f}M₫","Dự kiến nhận về","#3b82f6"), unsafe_allow_html=True)
@@ -443,18 +553,19 @@ COLORS_SAN  = {'TiktokShop': '#fe2c55', 'Shopee': '#f97316', 'Lazada': '#6366f1'
 
 
 # ══════════════════════════════════════════════════════════════════════
-# TABS
+# TABS  — thêm tab mới "📅 Theo Tháng"
 # ══════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab_month, tab4, tab5 = st.tabs([
     "🏪 Hiệu suất Sàn",
     "📦 Sản phẩm",
     "💸 Lợi nhuận",
+    "📅 Theo Tháng",
     "↩️ Hoàn hàng & Rủi ro",
     "🔍 Dữ liệu chi tiết"
 ])
 
 
-# ── TAB 1 ──────────────────────────────────────────────────────────────
+# ── TAB 1: HIỆU SUẤT SÀN ──────────────────────────────────────────────
 with tab1:
     st.markdown('<div class="sec-title">🏪 So Sánh Hiệu Suất Các Sàn TMĐT</div>', unsafe_allow_html=True)
 
@@ -529,7 +640,7 @@ with tab1:
         Kiểm tra chiến lược giá, hàng tặng và flash sale.</div>""", unsafe_allow_html=True)
 
 
-# ── TAB 2 ──────────────────────────────────────────────────────────────
+# ── TAB 2: SẢN PHẨM ──────────────────────────────────────────────────
 with tab2:
     st.markdown('<div class="sec-title">📦 Phân Tích Sản Phẩm Chi Tiết</div>', unsafe_allow_html=True)
 
@@ -624,7 +735,7 @@ with tab2:
     </div>""", unsafe_allow_html=True)
 
 
-# ── TAB 3 ──────────────────────────────────────────────────────────────
+# ── TAB 3: LỢI NHUẬN ─────────────────────────────────────────────────
 with tab3:
     st.markdown('<div class="sec-title">💸 Phân Tích Lợi Nhuận & Cơ Cấu Chi Phí</div>', unsafe_allow_html=True)
 
@@ -659,13 +770,11 @@ with tab3:
         fig2.update_layout(height=460, **CHART_THEME, coloraxis_showscale=False)
         st.plotly_chart(fig2, use_container_width=True)
 
-    # ── WATERFALL ──────────────────────────────────────────────────────
     st.markdown('<div class="sec-title">🪣 Waterfall Dòng Tiền</div>', unsafe_allow_html=True)
     tv  = filtered['Tien_ve_TK'].sum()
     gv  = -filtered[~filtered['La_hang_tang']]['Tong_gia_von'].sum()
     tg  = -tang_items['Tong_gia_von'].sum()
     hv  = -total_hoan
-    # FIX BUG 1: net phải cộng đủ 4 thành phần, bao gồm cả hàng hoàn (hv)
     net = tv + gv + tg + hv
 
     fig3 = go.Figure(go.Waterfall(
@@ -684,7 +793,6 @@ with tab3:
                        height=420, **CHART_THEME)
     st.plotly_chart(fig3, use_container_width=True)
 
-    # Ghi chú giải thích Lợi nhuận ròng vs Lợi nhuận KPI
     st.markdown(f"""
     <div class="insight insight-info">
     ℹ️ <b>Lợi nhuận ròng ({net/1e6:.2f}M₫)</b> = Tiền về TK − Giá vốn hàng bán − Chi phí hàng tặng − Giá vốn hàng hoàn.
@@ -724,7 +832,231 @@ with tab3:
                     unsafe_allow_html=True)
 
 
-# ── TAB 4 ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# TAB MỚI: PHÂN TÍCH THEO THÁNG
+# ══════════════════════════════════════════════════════════════════════
+with tab_month:
+    st.markdown('<div class="sec-title">📅 Phân Tích Xu Hướng Theo Tháng</div>', unsafe_allow_html=True)
+
+    # Dữ liệu theo tháng (không bị filter tháng để vẽ trend đầy đủ)
+    df_trend = all_data.copy()
+    if san_filter:
+        df_trend = df_trend[df_trend['San'].isin(san_filter)]
+    if not include_tang:
+        df_trend = df_trend[~df_trend['La_hang_tang']]
+    if ky_filter and 'Ky_bao_cao' in df_trend.columns:
+        df_trend = df_trend[df_trend['Ky_bao_cao'].isin(ky_filter)]
+
+    has_months = 'Thang_label' in df_trend.columns and df_trend['Thang_label'].notna().any()
+
+    if not has_months or len(all_months_raw) < 1:
+        st.info("ℹ️ Chưa đủ dữ liệu tháng. Tải thêm file hoặc đảm bảo file có cột Ngày hoặc tên file chứa tháng (vd: thang1.xlsx).")
+    else:
+        # ── Tổng hợp theo tháng ──────────────────────────────────────
+        monthly = (
+            df_trend.dropna(subset=['Thang_label'])
+            .groupby('Thang_label')
+            .agg(
+                Tien_ve_TK=('Tien_ve_TK', 'sum'),
+                Tong_gia_von=('Tong_gia_von', 'sum'),
+                Loi_nhuan=('Loi_nhuan', 'sum'),
+                So_luong=('So_luong', 'sum'),
+            )
+            .reset_index()
+            .sort_values('Thang_label')
+        )
+        monthly['Thang_fmt'] = monthly['Thang_label'].map(all_months_fmt).fillna(monthly['Thang_label'])
+        monthly['Bien_LN'] = monthly.apply(
+            lambda r: round(r['Loi_nhuan'] / r['Tien_ve_TK'] * 100, 1) if r['Tien_ve_TK'] > 0 else 0.0,
+            axis=1
+        )
+
+        # ── Tổng hợp theo tháng × sàn ────────────────────────────────
+        monthly_san = (
+            df_trend.dropna(subset=['Thang_label'])
+            .groupby(['Thang_label', 'San'])
+            .agg(
+                Tien_ve_TK=('Tien_ve_TK', 'sum'),
+                Loi_nhuan=('Loi_nhuan', 'sum'),
+                So_luong=('So_luong', 'sum'),
+            )
+            .reset_index()
+            .sort_values('Thang_label')
+        )
+        monthly_san['Thang_fmt'] = monthly_san['Thang_label'].map(all_months_fmt).fillna(monthly_san['Thang_label'])
+
+        # ── MINI KPI tháng hiện tại vs tháng trước ──────────────────
+        if len(monthly) >= 2:
+            cur = monthly.iloc[-1]
+            prv = monthly.iloc[-2]
+            def delta_badge(cur_v, prv_v):
+                if prv_v == 0:
+                    return "", ""
+                pct = (cur_v - prv_v) / abs(prv_v) * 100
+                color = "#22c55e" if pct >= 0 else "#ef4444"
+                arrow = "▲" if pct >= 0 else "▼"
+                return f"{arrow} {abs(pct):.1f}% vs {prv['Thang_fmt']}", color
+
+            km1_txt, km1_col = delta_badge(cur['Tien_ve_TK'], prv['Tien_ve_TK'])
+            km2_txt, km2_col = delta_badge(cur['Loi_nhuan'],  prv['Loi_nhuan'])
+            km3_txt, km3_col = delta_badge(cur['So_luong'],   prv['So_luong'])
+
+            st.markdown(f"#### 📌 Tháng gần nhất: **{cur['Thang_fmt']}**")
+            km1, km2, km3 = st.columns(3)
+            with km1: st.markdown(kpi_card("💰","Tiền về TK",f"{cur['Tien_ve_TK']/1e6:.2f}M₫",
+                                           "Tháng này","#3b82f6",km1_txt,km1_col), unsafe_allow_html=True)
+            with km2: st.markdown(kpi_card("📊","Lợi nhuận",f"{cur['Loi_nhuan']/1e6:.2f}M₫",
+                                           "Tháng này","#22c55e" if cur['Loi_nhuan']>=0 else "#ef4444",
+                                           km2_txt,km2_col), unsafe_allow_html=True)
+            with km3: st.markdown(kpi_card("🛒","Sản lượng",f"{int(cur['So_luong']):,}",
+                                           "Tháng này","#f59e0b",km3_txt,km3_col), unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── ROW 1: Line trend + Bar grouped ──────────────────────────
+        col_t1, col_t2 = st.columns(2)
+
+        with col_t1:
+            fig_line = go.Figure()
+            fig_line.add_scatter(
+                x=monthly['Thang_fmt'], y=monthly['Tien_ve_TK'],
+                mode='lines+markers+text', name='Tiền về TK',
+                line=dict(color='#3b82f6', width=2.5), marker=dict(size=8),
+                text=(monthly['Tien_ve_TK']/1e6).round(2),
+                texttemplate='%{text:.2f}M', textposition='top center'
+            )
+            fig_line.add_scatter(
+                x=monthly['Thang_fmt'], y=monthly['Loi_nhuan'],
+                mode='lines+markers+text', name='Lợi nhuận',
+                line=dict(color='#22c55e', width=2.5, dash='dot'), marker=dict(size=8),
+                text=(monthly['Loi_nhuan']/1e6).round(2),
+                texttemplate='%{text:.2f}M', textposition='bottom center'
+            )
+            fig_line.add_hline(y=0, line_dash='dash', line_color='#94a3b8', line_width=1)
+            fig_line.update_layout(
+                title='📈 Xu hướng Tiền về TK & Lợi nhuận theo tháng',
+                height=380, **CHART_THEME,
+                legend=dict(orientation='h', y=-0.2),
+                xaxis_title='Tháng', yaxis_title='Giá trị (₫)'
+            )
+            st.plotly_chart(fig_line, use_container_width=True)
+
+        with col_t2:
+            fig_bar_m = px.bar(
+                monthly, x='Thang_fmt', y='So_luong',
+                title='🛒 Sản lượng theo tháng',
+                color='Bien_LN', color_continuous_scale='RdYlGn',
+                text='So_luong',
+                labels={'Thang_fmt': 'Tháng', 'So_luong': 'Sản lượng', 'Bien_LN': 'Biên LN%'}
+            )
+            fig_bar_m.update_traces(texttemplate='%{text:.0f}', textposition='outside')
+            fig_bar_m.update_layout(height=380, **CHART_THEME, coloraxis_showscale=True)
+            st.plotly_chart(fig_bar_m, use_container_width=True)
+
+        # ── ROW 2: Grouped bar sàn theo tháng ────────────────────────
+        st.markdown('<div class="sec-title">🏪 Doanh Thu Theo Tháng × Sàn</div>', unsafe_allow_html=True)
+
+        metric_sel = st.selectbox(
+            "Chỉ tiêu hiển thị",
+            ['Tiền về TK', 'Lợi nhuận', 'Sản lượng'],
+            key='month_metric'
+        )
+        metric_col = {'Tiền về TK': 'Tien_ve_TK', 'Lợi nhuận': 'Loi_nhuan', 'Sản lượng': 'So_luong'}[metric_sel]
+
+        fig_grp = px.bar(
+            monthly_san, x='Thang_fmt', y=metric_col, color='San',
+            barmode='group',
+            color_discrete_map=COLORS_SAN,
+            title=f'📊 {metric_sel} theo Tháng & Sàn',
+            text=monthly_san[metric_col].apply(
+                lambda v: f"{v/1e6:.2f}M₫" if metric_sel != 'Sản lượng' else f"{v:.0f}"
+            ),
+            labels={'Thang_fmt': 'Tháng', metric_col: metric_sel, 'San': 'Sàn'}
+        )
+        fig_grp.update_traces(textposition='outside')
+        fig_grp.update_layout(height=400, **CHART_THEME, legend=dict(orientation='h', y=-0.2))
+        st.plotly_chart(fig_grp, use_container_width=True)
+
+        # ── ROW 3: Pivot table tháng × sàn ───────────────────────────
+        st.markdown('<div class="sec-title">📋 Bảng Pivot: Tháng × Sàn</div>', unsafe_allow_html=True)
+
+        pivot_metric = st.selectbox(
+            "Chỉ tiêu pivot",
+            ['Tien_ve_TK', 'Loi_nhuan', 'So_luong'],
+            format_func=lambda x: {'Tien_ve_TK': 'Tiền về TK', 'Loi_nhuan': 'Lợi nhuận', 'So_luong': 'Sản lượng'}[x],
+            key='pivot_metric'
+        )
+
+        pivot = monthly_san.pivot_table(
+            index='Thang_fmt', columns='San', values=pivot_metric, aggfunc='sum', fill_value=0
+        )
+
+        # Thêm cột Tổng
+        pivot['Tổng'] = pivot.sum(axis=1)
+
+        # Format hiển thị
+        is_sl = pivot_metric == 'So_luong'
+        pivot_disp = pivot.copy()
+        for c in pivot_disp.columns:
+            pivot_disp[c] = pivot_disp[c].apply(
+                lambda x: f"{x:.0f}" if is_sl else f"{x/1e6:.3f}M₫"
+            )
+        pivot_disp.index.name = 'Tháng'
+        st.dataframe(pivot_disp, use_container_width=True)
+
+        # ── Biên LN từng tháng ────────────────────────────────────────
+        st.markdown('<div class="sec-title">📉 Biên Lợi Nhuận (%) Theo Tháng</div>', unsafe_allow_html=True)
+
+        fig_bien = go.Figure()
+        fig_bien.add_bar(
+            x=monthly['Thang_fmt'],
+            y=monthly['Bien_LN'],
+            marker_color=['#22c55e' if v >= 0 else '#ef4444' for v in monthly['Bien_LN']],
+            text=monthly['Bien_LN'].apply(lambda v: f"{v:.1f}%"),
+            textposition='outside',
+            name='Biên LN%'
+        )
+        fig_bien.add_hline(y=0, line_dash='dash', line_color='#94a3b8')
+        if len(monthly) > 1:
+            avg_bien = monthly['Bien_LN'].mean()
+            fig_bien.add_hline(y=avg_bien, line_dash='dot', line_color='#3b82f6',
+                               annotation_text=f"TB: {avg_bien:.1f}%", annotation_position="right")
+        fig_bien.update_layout(
+            title='📉 Biên lợi nhuận % từng tháng',
+            height=360, **CHART_THEME,
+            yaxis_title='Biên LN (%)', xaxis_title='Tháng'
+        )
+        st.plotly_chart(fig_bien, use_container_width=True)
+
+        # ── Insight tự động ──────────────────────────────────────────
+        if len(monthly) >= 2:
+            best_m  = monthly.loc[monthly['Loi_nhuan'].idxmax()]
+            worst_m = monthly.loc[monthly['Loi_nhuan'].idxmin()]
+            growth  = (monthly['Tien_ve_TK'].iloc[-1] - monthly['Tien_ve_TK'].iloc[-2]) / \
+                       abs(monthly['Tien_ve_TK'].iloc[-2]) * 100 \
+                       if monthly['Tien_ve_TK'].iloc[-2] != 0 else 0
+
+            st.markdown(f"""
+            <div class="insight insight-good">
+            🏆 <b>Tháng tốt nhất:</b> {best_m['Thang_fmt']} — Lợi nhuận <b>{best_m['Loi_nhuan']/1e6:.2f}M₫</b>,
+            biên LN <b>{best_m['Bien_LN']:.1f}%</b>.
+            </div>
+            <div class="insight {'insight-good' if growth >= 0 else 'insight-bad'}">
+            {'📈' if growth >= 0 else '📉'} <b>Tháng gần nhất ({monthly.iloc[-1]['Thang_fmt']}):</b>
+            Tiền về TK {"tăng" if growth >= 0 else "giảm"} <b>{abs(growth):.1f}%</b>
+            so với tháng trước ({monthly.iloc[-2]['Thang_fmt']}).
+            </div>
+            <div class="insight insight-warn">
+            ⚠️ <b>Tháng thấp nhất:</b> {worst_m['Thang_fmt']} — Lợi nhuận <b>{worst_m['Loi_nhuan']/1e6:.2f}M₫</b>.
+            Kiểm tra lại chiến lược giá & hàng tặng tháng đó.
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div class="insight insight-info">
+            ℹ️ Tải thêm file từ nhiều tháng khác nhau để xem so sánh và xu hướng.
+            </div>""", unsafe_allow_html=True)
+
+
+# ── TAB 4: HOÀN HÀNG & RỦI RO ────────────────────────────────────────
 with tab4:
     st.markdown('<div class="sec-title">↩️ Phân Tích Đơn Hoàn Hàng</div>', unsafe_allow_html=True)
 
@@ -805,7 +1137,7 @@ with tab4:
             st.success("✅ Không có sản phẩm ở mức rủi ro cao!")
 
 
-# ── TAB 5 ──────────────────────────────────────────────────────────────
+# ── TAB 5: DỮ LIỆU CHI TIẾT ──────────────────────────────────────────
 with tab5:
     st.markdown('<div class="sec-title">🔍 Tra Cứu & Xuất Dữ Liệu</div>', unsafe_allow_html=True)
 
@@ -816,6 +1148,11 @@ with tab5:
     with fc4: pnl_det  = st.selectbox("Lợi nhuận", ['Tất cả', 'Có lãi ✅', 'Thua lỗ ❌'])
 
     det = all_data[all_data['San'].isin(san_det)].copy() if san_det else all_data.copy()
+
+    # ── Filter tháng trong tab chi tiết ──
+    if all_months_raw and month_filter_raw:
+        det = det[det['Thang_label'].isin(month_filter_raw)]
+
     if type_det == 'Hàng bán':   det = det[~det['La_hang_tang']]
     elif type_det == 'Hàng tặng': det = det[det['La_hang_tang']]
     if pnl_det == 'Có lãi ✅':    det = det[det['Loi_nhuan'] >= 0]
@@ -838,11 +1175,14 @@ with tab5:
     📊 LN: <b style="color:{'#22c55e' if total_det_ln>=0 else '#ef4444'}">{total_det_ln:,.0f}₫</b>
     </div>""", unsafe_allow_html=True)
 
-    show_cols = [c for c in ['San', 'Ten_hang_hoa', 'Khach_hang', 'So_luong', 'Gia_von',
-                              'Tong_gia_von', 'Tien_ve_TK', 'Loi_nhuan', 'La_hang_tang'] if c in det.columns]
+    show_cols = [c for c in ['San', 'Thang_label', 'Ten_hang_hoa', 'Khach_hang', 'So_luong',
+                              'Gia_von', 'Tong_gia_von', 'Tien_ve_TK', 'Loi_nhuan',
+                              'La_hang_tang'] if c in det.columns]
     det_disp = det[show_cols].copy()
     det_disp['La_hang_tang'] = det_disp['La_hang_tang'].map({True: '🎁 Tặng', False: '✅ Bán'})
-    rename_det = {'San':'Sàn','Ten_hang_hoa':'Tên hàng','Khach_hang':'Khách',
+    if 'Thang_label' in det_disp.columns:
+        det_disp['Thang_label'] = det_disp['Thang_label'].map(all_months_fmt).fillna(det_disp['Thang_label'])
+    rename_det = {'San':'Sàn','Thang_label':'Tháng','Ten_hang_hoa':'Tên hàng','Khach_hang':'Khách',
                   'So_luong':'SL','Gia_von':'GV/SP','Tong_gia_von':'T.GV',
                   'Tien_ve_TK':'Tiền về TK','Loi_nhuan':'Lợi nhuận','La_hang_tang':'Loại'}
     det_disp.rename(columns=rename_det, inplace=True)
@@ -859,7 +1199,6 @@ with tab5:
         st.markdown('<div class="sec-title">🏷️ Tổng Hợp Theo Thương Hiệu</div>', unsafe_allow_html=True)
         sl_b = sl_data.copy()
         sl_b['TH'] = sl_b['Thuong_hieu'].ffill()
-        # FIX: loại bỏ tên sàn bị lọt vào cột thương hiệu ở footer
         platform_names = {'tiktok shop', 'shopee', 'lazada', 'tiktokshop'}
         sl_b = sl_b[~sl_b['TH'].astype(str).str.strip().str.lower().isin(platform_names)]
         bs = sl_b[~sl_b['La_hang_tang']].groupby('TH').agg(
@@ -877,10 +1216,12 @@ with tab5:
 
 # ─── FOOTER ─────────────────────────────────────────────────────────────────
 st.markdown("---")
+months_footer = " · ".join([all_months_fmt.get(m, m) for m in all_months_raw]) if all_months_raw else "—"
 st.markdown(f"""
 <div style="text-align:center;color:#94a3b8;font-size:0.78rem;padding:10px 0">
     📊 Phân tích TMĐT Online &nbsp;|&nbsp;
     <code>{file_label}</code> &nbsp;|&nbsp;
     Sàn: {" · ".join(available_sans)} &nbsp;|&nbsp;
+    📅 {months_footer} &nbsp;|&nbsp;
     {len(all_data):,} giao dịch được phân tích
 </div>""", unsafe_allow_html=True)
