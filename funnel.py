@@ -1,1730 +1,1063 @@
+# -*- coding: utf-8 -*-
+"""BÁO CÁO TUYỂN DỤNG THEO THÁNG – một file duy nhất.
+
+Chạy:   pip install streamlit pandas openpyxl xlsxwriter numpy
+        streamlit run app_tuyen_dung.py
+Thư mục dữ liệu (nhập ở thanh bên hoặc đặt biến môi trường TD_DATA_DIR) cần có 4 file, tên chứa:
+  "TUYỂN DỤNG - DATA" | "KẾ TOÁN ADMIN" | "MASTER DATA" | "Report Tuyển Dụng" (Facebook Ads, tùy chọn).  Hoặc chọn "Tải file lên".
+
+Định nghĩa (đúng công thức của file DATA / báo cáo tháng 10):
+  CV = ngày liên lạc trong tháng | Tham gia PV = ngày PV trong tháng & KQ ∈ {Đạt, Đợi kết quả, Không đạt} | Pass = ngày PV trong tháng & Đạt
+  Nhận việc = ngày nhận việc trong tháng & "Đã nhận việc" | Nghỉ việc = hợp CHECK LIST + NGHỈ VIỆC (Kế toán) + Master theo ngày nghỉ; nghỉ thử việc = làm < 30 ngày.
+Công tắc "Khớp báo cáo đã duyệt" áp dụng khối điều chỉnh ADJ (bên dưới) cho tháng có báo cáo; tắt = số thuần từ raw."""
+import io, os, re, glob, datetime, unicodedata, difflib, warnings
+import numpy as np, pandas as pd, openpyxl
 import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-import io
-import re
-import warnings
-from openpyxl import Workbook
-from openpyxl.styles import (Font, PatternFill, Alignment, Border, Side,
-                              GradientFill)
-from openpyxl.utils import get_column_letter
 warnings.filterwarnings('ignore')
 
-st.set_page_config(
-    page_title="📊 Phân Tích TMĐT Online",
-    page_icon="🛍️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# ─── CSS ───────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Sora:wght@700;800&display=swap');
-
-html, body, [class*="css"], .stApp, .stMarkdown, .stText, button, input, select, textarea {
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
+# =====================================================================================================
+# 1) ĐIỀU CHỈNH ĐỂ KHỚP BÁO CÁO ĐÃ DUYỆT (mỗi tháng một khối; tháng không có khối = dùng số raw)
+# =====================================================================================================
+LY_RAW = 'DATA raw thấp hơn báo cáo, chưa xác định được dòng (nghi do dòng Đợi kết quả / thiếu ngày PV được cập nhật sau)'
+ADJ = {
+ (2026, 10): dict(
+  ten='Báo cáo tuyển dụng tháng 10/2026 (đã duyệt)',
+  nhan_viec_bo_sung=[
+    dict(TEN='NGUYỄN THỊ YẾN LINH', KHOI='Chi Nhánh', CN='Vũng Tàu', VITRI=None, NGUON='Giới thiệu nội bộ', LH='Sương', NNV='2026-10-31', ly_do='DATA để trống kết quả nhận việc (báo cáo tính đã nhận việc)'),
+    dict(TEN='PHẠM THỊ PHƯƠNG NHUNG', KHOI='Chi Nhánh', CN='Thủ Đức', VITRI=None, NGUON='Zalo', LH='Sương', NNV='2026-10-23', ly_do='DATA chỉ có bản ghi ngày NV 12/09/2026 (báo cáo tính nhận việc 23/10)')],
+  loai_tru_nghi=[
+    ('NGUYEN THANH THAO', '2026-10-26', 'Có trong Kế toán/DATA là đã nghỉ 27/10 nhưng báo cáo không liệt kê – CẦN XÁC MINH'),
+    ('TRINH NGUYEN HOANG YEN', '2026-10-14', 'Nghỉ 20/10 theo Kế toán, báo cáo không liệt kê – CẦN XÁC MINH'),
+    ('TRUONG MY PHUONG', '2026-10-14', 'Nghỉ 20/10 theo Kế toán, báo cáo không liệt kê – CẦN XÁC MINH'),
+    ('TRAN THI THANH THAO', '2026-10-12', 'Bình Dương, nghỉ ngang 13/10, báo cáo không liệt kê – CẦN XÁC MINH')],
+  delta_nguon={('Zalo','CV'):1, ('(không ghi nguồn)','CV'):-1, ('Zalo','PV'):1, ('Zalo','PASS'):3, ('Zalo','NV'):1, ('Giới thiệu nội bộ','NV'):1, ('Giới thiệu nội bộ','KHONG_NV'):-1},
+  delta_hr={('Thảo','CV'):1, ('(không ghi người LH)','CV'):-1, ('Thảo','PV'):1, ('Sương','PASS'):2, ('Thảo','PASS'):1, ('Sương','NV'):1, ('Thảo','NV'):1},
+  delta_unit={('Bình Dương','PASS'):2, ('Vũng Tàu','PASS'):1, ('Vũng Tàu','PV'):1, ('Vũng Tàu','NV'):1, ('Thủ Đức','NV'):1, ('Vũng Tàu','KHONG_NV'):-1},
+  delta_dept={('TÂN BÌNH','KDAT'):1, ('BÌNH DƯƠNG','DAT'):2, ('VŨNG TÀU','CV'):1, ('VŨNG TÀU','PV'):1, ('VŨNG TÀU','DAT'):1, ('VŨNG TÀU','NV'):1, ('VŨNG TÀU','KNV'):-1, ('THỦ ĐỨC','NV'):1},
+  ly_do_delta={'nguon':'Zalo +1 CV (dòng LƯU THỊ THANH THẢO thiếu nguồn/người LH), +1 PV, +3 Pass (2 dòng Bình Dương "Đợi kết quả" → Đạt và TRẦN HOÀI AN chưa có ngày PV/kết quả); chưa xác nhận.',
+               'hr': LY_RAW, 'unit': LY_RAW, 'dept': LY_RAW + '. Riêng Tân Bình "Không đạt PV": báo cáo ghi 2 do công thức BC-2026!K26 trỏ nhầm cột, dữ liệu là 1.'},
+  dau_ky={'QUẬN 1':68,'PHÚ NHUẬN':66,'TÂN BÌNH':35,'GÒ VẤP':68,'QUẬN 10':53,'TÂN PHÚ':48,'BÌNH TÂN':44,'VŨNG TÀU':19,'BÌNH DƯƠNG':39,'THỦ ĐỨC':19},
+  sl_yc={'QUẬN 1':10,'PHÚ NHUẬN':5,'TÂN BÌNH':11,'GÒ VẤP':13,'QUẬN 10':10,'TÂN PHÚ':7,'BÌNH TÂN':10,'VŨNG TÀU':2,'BÌNH DƯƠNG':4,'THỦ ĐỨC':-6},
+  chi_phi_tay={'CareerViet':7056000, 'TopCV':3370000},
+  ads_bo_sung={'2026-10-30':(3134353,12), '2026-10-31':(2520176,9)},
+  ly_do_nhom={'Gia đình, cá nhân, về quê':18,'Công việc không phù hợp':13,'Sức khỏe không đảm bảo':9,'Môi trường làm việc không phù hợp':7,'Thời gian làm việc, áp lực KPI':6,'Thay đổi định hướng, tìm cơ hội mới':5,'Khoảng cách, đi lại, điều chuyển chi nhánh':6,'Học tập, thi cử':1,'Công ty cho nghỉ':1,'Không tái ký hợp đồng':1,'Hết thực tập':1,'Không liên hệ được':3},
+  baseline_raw=dict(funnel=dict(CV=643, PV=200, PASS=129, KHONG_DAT=56, DOI_KQ=15, KHONG_DEN_PV=33, NV=98, KHONG_NV=35), nghi_raw=74),   # số thuần từ raw lúc lập điều chỉnh: nếu raw đổi thì cảnh báo
+  dat_thu_viec_bo_sung={'HM3188':'Master: đã nghỉ 07/10 sau khi hết thử việc 02/10 – báo cáo vẫn liệt kê'},
+  cn_ghi_de={'LE HOANG MY':'Tân Bình','HO LE MY HOA':'Tân Bình'},
+  ten_theo_bao_cao={'VO NGUYEN PHONG':'VŨ NGUYÊN PHONG','TRAN THI QUYNH NHI':'TRẦN QUỲNH NHI','NGUYEN THANH':'NGUYỄN VĂN THÀNH','BUI VO THUY VY':'BÙI VÕ THẢO VY','NGUYEN THI YEN NHI':'NGUYỄN THỊ YẾN NHƯ','TRUONG HOAI BAO NGOC':'TRƯƠNG HOÀNG BẢO NGỌC','NGO THI HANH THI':'NGÔ HỒ HẠNH THI'},
+ ),
 }
-
-.stApp { background: #f4f6fb; }
-
-/* ── Sidebar ── */
-[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%) !important;
-    border-right: 1px solid rgba(255,255,255,0.06);
-}
-[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
-[data-testid="stSidebar"] label {
-    color: #64748b !important; font-size: 0.72rem !important;
-    text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600 !important;
-}
-[data-testid="stSidebar"] h3 { color: #f1f5f9 !important; font-size: 0.95rem !important; font-weight: 700 !important; }
-[data-testid="stSidebar"] .stSuccess { background: rgba(34,197,94,0.12) !important; border: 1px solid rgba(34,197,94,0.25) !important; }
-[data-testid="stSidebar"] .stSuccess * { color: #86efac !important; }
-[data-testid="stSidebar"] .stCaption * { color: #64748b !important; }
-[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.08) !important; }
-
-/* ── Upload zone ── */
-.upload-zone {
-    background: linear-gradient(135deg, #0f172a 0%, #1e293b 55%, #0f3460 100%);
-    border-radius: 24px; padding: 72px 40px; text-align: center;
-    color: white; margin-bottom: 28px;
-    border: 1.5px dashed rgba(255,255,255,0.15);
-    position: relative; overflow: hidden;
-}
-.upload-zone::before {
-    content: ''; position: absolute; inset: 0;
-    background: radial-gradient(ellipse 60% 50% at 70% 30%, rgba(59,130,246,0.12) 0%, transparent 70%);
-    pointer-events: none;
-}
-.upload-zone h1 {
-    font-family: 'Sora', sans-serif !important;
-    font-size: 2.4rem; font-weight: 800; margin: 0 0 10px 0;
-    letter-spacing: -0.02em;
-}
-.upload-zone p { opacity: 0.6; font-size: 0.93rem; margin: 0; }
-
-/* ── Dashboard header ── */
-.dash-header {
-    background: linear-gradient(120deg, #0f172a 0%, #1e293b 50%, #0f3460 100%);
-    border-radius: 18px; padding: 22px 30px; margin-bottom: 20px; color: white;
-    border: 1px solid rgba(255,255,255,0.06);
-    box-shadow: 0 4px 24px rgba(0,0,0,0.15);
-}
-.dash-header h2 {
-    font-family: 'Sora', sans-serif !important;
-    font-size: 1.4rem; font-weight: 800; margin: 0 0 5px 0; letter-spacing: -0.01em;
-}
-.dash-header p { opacity: 0.55; font-size: 0.82rem; margin: 0; line-height: 1.6; }
-
-/* ── KPI cards ── */
-.kpi-wrap {
-    background: white; border-radius: 16px; padding: 18px 20px;
-    border-top: 4px solid; box-shadow: 0 1px 12px rgba(0,0,0,0.06);
-    height: 100%; transition: all 0.22s ease;
-    position: relative; overflow: hidden;
-}
-.kpi-wrap::after {
-    content: ''; position: absolute; right: -10px; bottom: -10px;
-    width: 70px; height: 70px; border-radius: 50%;
-    background: currentColor; opacity: 0.04;
-    pointer-events: none;
-}
-.kpi-wrap:hover { box-shadow: 0 8px 28px rgba(0,0,0,0.12); transform: translateY(-3px); }
-.kpi-icon { font-size: 1.4rem; margin-bottom: 10px; display: block; }
-.kpi-label {
-    font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.09em; color: #94a3b8; margin-bottom: 5px;
-}
-.kpi-value { font-size: 1.55rem; font-weight: 800; line-height: 1.1; letter-spacing: -0.02em; }
-.kpi-sub { font-size: 0.75rem; color: #94a3b8; margin-top: 6px; }
-.kpi-badge {
-    display: inline-block; padding: 2px 9px; border-radius: 20px;
-    font-size: 0.68rem; font-weight: 700; margin-top: 7px; letter-spacing: 0.02em;
-}
-
-/* ── Section titles ── */
-.sec-title {
-    font-size: 0.95rem; font-weight: 700; color: #0f172a;
-    padding: 16px 0 10px 0; border-bottom: 2px solid #e2e8f0; margin-bottom: 16px;
-    letter-spacing: -0.01em;
-}
-
-/* ── Insight boxes ── */
-.insight {
-    border-radius: 10px; padding: 12px 16px; margin: 7px 0;
-    font-size: 0.85rem; line-height: 1.65; font-weight: 500;
-}
-.insight-warn  { background: #fffbeb; border-left: 4px solid #f59e0b; color: #78350f; }
-.insight-bad   { background: #fff1f2; border-left: 4px solid #f43f5e; color: #881337; }
-.insight-good  { background: #f0fdf4; border-left: 4px solid #22c55e; color: #14532d; }
-.insight-info  { background: #eff6ff; border-left: 4px solid #3b82f6; color: #1e3a5f; }
-
-/* ── Tabs ── */
-.stTabs [data-baseweb="tab-list"] {
-    gap: 4px; background: #e8ecf5; border-radius: 14px; padding: 5px;
-    border: 1px solid #dde3f0;
-}
-.stTabs [data-baseweb="tab"] {
-    background: transparent; border-radius: 10px; padding: 8px 16px;
-    font-weight: 600; color: #64748b; border: none !important; font-size: 0.82rem;
-    transition: all 0.18s;
-}
-.stTabs [data-baseweb="tab"]:hover { color: #334155; background: rgba(255,255,255,0.6); }
-.stTabs [aria-selected="true"] {
-    background: linear-gradient(135deg, #1e293b, #0f3460) !important;
-    color: white !important; box-shadow: 0 2px 10px rgba(15,52,96,0.28) !important;
-}
-
-/* ── Risk items ── */
-.risk-item {
-    background: white; border-radius: 10px; padding: 10px 14px; margin: 5px 0;
-    border-left: 4px solid; font-size: 0.82rem; box-shadow: 0 1px 5px rgba(0,0,0,0.06);
-}
-
-/* ── Tab filter bar ── */
-.tab-filter-bar {
-    background: #f8faff; border-radius: 12px; padding: 14px 18px; margin-bottom: 16px;
-    border: 1.5px solid #dbeafe;
-}
-
-/* ── Download button styling ── */
-.stDownloadButton button {
-    background: linear-gradient(135deg, #1e293b, #0f3460) !important;
-    color: white !important; border: none !important; border-radius: 10px !important;
-    font-weight: 600 !important; font-size: 0.84rem !important;
-    padding: 10px 20px !important; transition: all 0.2s !important;
-    box-shadow: 0 2px 8px rgba(15,52,96,0.25) !important;
-    font-family: 'Plus Jakarta Sans', sans-serif !important;
-}
-.stDownloadButton button:hover {
-    transform: translateY(-1px) !important;
-    box-shadow: 0 4px 14px rgba(15,52,96,0.35) !important;
-}
-
-/* ── Dataframe ── */
-.stDataFrame { border-radius: 12px !important; overflow: hidden !important; }
-
-/* ── Feature cards (landing) ── */
-.feat-card {
-    background: white; border-radius: 16px; padding: 28px 22px; text-align: center;
-    box-shadow: 0 2px 16px rgba(0,0,0,0.07); min-height: 190px;
-    border: 1px solid #e8ecf5; transition: all 0.22s;
-}
-.feat-card:hover { box-shadow: 0 8px 28px rgba(0,0,0,0.11); transform: translateY(-2px); }
-
-/* scrollbar */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 3px; }
-::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════
-# HELPERS – UI
-# ══════════════════════════════════════════════════════════════════════
-def kpi_card(icon, label, value, sub, color, badge_txt="", badge_color=""):
-    badge = (f'<div class="kpi-badge" style="background:{badge_color}22;color:{badge_color}">'
-             f'{badge_txt}</div>') if badge_txt else ""
-    return f"""
-    <div class="kpi-wrap" style="border-top-color:{color}">
-        <span class="kpi-icon">{icon}</span>
-        <div class="kpi-label">{label}</div>
-        <div class="kpi-value" style="color:{color}">{value}</div>
-        <div class="kpi-sub">{sub}</div>
-        {badge}
-    </div>"""
-
-
-# ══════════════════════════════════════════════════════════════════════
-# EXCEL EXPORT
-# ══════════════════════════════════════════════════════════════════════
-def _thin_border():
-    t = Side(style='thin', color='E2E8F0')
-    return Border(left=t, right=t, top=t, bottom=t)
-
-
-def _header_cell(ws, row, col, value,
-                 bg="1E293B", fg="FFFFFF", size=10, bold=True, center=True, wrap=True):
-    c = ws.cell(row=row, column=col, value=value)
-    c.font = Font(name="Arial", bold=bold, color=fg, size=size)
-    c.fill = PatternFill("solid", start_color=bg)
-    c.alignment = Alignment(horizontal="center" if center else "left",
-                            vertical="center", wrap_text=wrap)
-    c.border = _thin_border()
-    return c
-
-
-def _data_cell(ws, row, col, value, fmt=None, bold=False, bg=None, fg="111827",
-               center=False, wrap=False):
-    c = ws.cell(row=row, column=col, value=value)
-    c.font = Font(name="Arial", bold=bold, color=fg, size=9)
-    if bg:
-        c.fill = PatternFill("solid", start_color=bg)
-    if fmt:
-        c.number_format = fmt
-    c.alignment = Alignment(horizontal="center" if center else "left",
-                            vertical="center", wrap_text=wrap)
-    c.border = _thin_border()
-    return c
-
-
-def _set_col_widths(ws, widths):
-    for col_letter, w in widths.items():
-        ws.column_dimensions[col_letter].width = w
-
-
-def _freeze(ws, cell="A2"):
-    ws.freeze_panes = cell
-
-
-def _sheet_no_grid(ws):
-    ws.sheet_view.showGridLines = False
-
-
-def export_excel_bytes(filtered_df, sl_df, hoan_df, monthly_df, san_summary_df,
-                       report_info=""):
-    """Tạo file Excel báo cáo đẹp với nhiều sheet."""
-    wb = Workbook()
-
-    DARK   = "1E293B"
-    BLUE   = "3B82F6"
-    GREEN  = "22C55E"
-    RED    = "EF4444"
-    PURPLE = "8B5CF6"
-    AMBER  = "F59E0B"
-    PINK   = "EC4899"
-    LGRAY  = "F8FAFF"
-    MGRAY  = "EFF2F8"
-    DKRED  = "881337"
-    DKGRN  = "14532D"
-
-    # ─────────────────────────────────────
-    # SHEET 1 – TỔNG QUAN
-    # ─────────────────────────────────────
-    ws1 = wb.active
-    ws1.title = "Tong quan"
-    _sheet_no_grid(ws1)
-    ws1.row_dimensions[1].height = 14
-    ws1.row_dimensions[2].height = 38
-    ws1.row_dimensions[3].height = 14
-
-    # Title banner
-    ws1.merge_cells("A2:I2")
-    tc = ws1["A2"]
-    tc.value = "📊  BÁO CÁO PHÂN TÍCH DOANH SỐ THƯƠNG MẠI ĐIỆN TỬ"
-    tc.font = Font(name="Arial", bold=True, size=15, color="FFFFFF")
-    tc.fill = PatternFill("solid", start_color=DARK)
-    tc.alignment = Alignment(horizontal="center", vertical="center")
-
-    # Sub-info row
-    ws1.merge_cells("A4:I4")
-    si = ws1["A4"]
-    si.value = report_info or "Nguồn: File Excel tải lên  |  Xuất từ hệ thống Phân Tích TMĐT"
-    si.font = Font(name="Arial", size=9, color="64748B")
-    si.alignment = Alignment(horizontal="center", vertical="center")
-
-    # KPI section label
-    ws1.row_dimensions[6].height = 20
-    ws1.merge_cells("A6:I6")
-    kl = ws1["A6"]
-    kl.value = "  KẾT QUẢ KINH DOANH TỔNG HỢP"
-    kl.font = Font(name="Arial", bold=True, size=10, color=DARK)
-    kl.fill = PatternFill("solid", start_color="E8ECF5")
-    kl.alignment = Alignment(horizontal="left", vertical="center")
-
-    # KPI data
-    tv  = filtered_df['Tien_ve_TK'].sum() if 'Tien_ve_TK' in filtered_df else 0
-    gv  = filtered_df['Tong_gia_von'].sum() if 'Tong_gia_von' in filtered_df else 0
-    ln  = filtered_df['Loi_nhuan'].sum() if 'Loi_nhuan' in filtered_df else 0
-    sl  = filtered_df['So_luong'].sum() if 'So_luong' in filtered_df else 0
-    bien = round(ln / tv * 100, 1) if tv else 0.0
-    hoan_total = hoan_df['Tong_gia_von'].sum() if len(hoan_df) > 0 else 0
-    tang_df = filtered_df[filtered_df['La_hang_tang']] if 'La_hang_tang' in filtered_df.columns else pd.DataFrame()
-    tang_gv = tang_df['Tong_gia_von'].sum() if len(tang_df) > 0 else 0
-
-    kpi_rows = [
-        ("💰 Tiền Về TK",      tv,        "#,##0₫",  BLUE,   "Dự kiến nhận về tài khoản"),
-        ("📦 Tổng Giá Vốn",    gv,        "#,##0₫",  PURPLE, "Chi phí vốn hàng bán"),
-        ("📊 Lợi Nhuận",       ln,        "#,##0₫",  GREEN if ln >= 0 else RED, "Lợi nhuận sau giá vốn"),
-        ("🛒 Sản Lượng",       int(sl),   "#,##0",   AMBER,  "Tổng sản phẩm bán ra"),
-        ("📈 Biên Lợi Nhuận",  bien / 100,"0.0%",    BLUE,   "Tỷ lệ lợi nhuận / tiền về"),
-        ("🎁 Chi Phí Hàng Tặng",tang_gv,  "#,##0₫",  PINK,   "Giá vốn hàng tặng kèm"),
-        ("↩️ Giá Vốn Hoàn",    hoan_total,"#,##0₫",  RED,    "Giá vốn đơn hàng bị hoàn"),
-    ]
-
-    ws1.row_dimensions[7].height = 15
-    COLS_K = ['A','B','C','D','E','F','G','H','I']
-    # Header row for KPIs
-    for ci, h in enumerate(["Chỉ tiêu","Giá trị","Ghi chú"]):
-        c = ws1.cell(row=8, column=ci*3+1 if ci == 0 else (5 if ci == 1 else 7))
-        # simplified: just use rows 8-onward
-    # Clear and rewrite KPIs cleanly
-    ws1.row_dimensions[8].height = 18
-    _header_cell(ws1, 8, 1, "CHỈ TIÊU", bg=DARK, size=9)
-    _header_cell(ws1, 8, 2, "GIÁ TRỊ", bg=DARK, size=9)
-    _header_cell(ws1, 8, 3, "GHI CHÚ", bg=DARK, size=9)
-    ws1.merge_cells("C8:E8")
-
-    for i, (label, val, fmt, color, note) in enumerate(kpi_rows):
-        r = 9 + i
-        ws1.row_dimensions[r].height = 20
-        row_bg = LGRAY if i % 2 == 0 else "FFFFFF"
-        _data_cell(ws1, r, 1, label, bold=True, bg=row_bg, fg=DARK)
-        c2 = _data_cell(ws1, r, 2, val, fmt=fmt, bold=True, bg=row_bg, fg=color, center=True)
-        ws1.merge_cells(f"C{r}:E{r}")
-        _data_cell(ws1, r, 3, note, bg=row_bg, fg="64748B")
-
-    # By-platform table
-    start_r = 9 + len(kpi_rows) + 2
-    ws1.merge_cells(f"A{start_r}:E{start_r}")
-    lbl = ws1.cell(row=start_r, column=1, value="  HIỆU SUẤT THEO SÀN TMĐT")
-    lbl.font = Font(name="Arial", bold=True, size=10, color=DARK)
-    lbl.fill = PatternFill("solid", start_color="E8ECF5")
-    lbl.alignment = Alignment(horizontal="left", vertical="center")
-    ws1.row_dimensions[start_r].height = 20
-
-    ph = start_r + 1
-    for ci, h in enumerate(["Sàn TMĐT","Tiền Về TK","Tổng GV","Lợi Nhuận","Biên LN%"]):
-        _header_cell(ws1, ph, ci + 1, h, bg=DARK, size=9)
-    ws1.row_dimensions[ph].height = 18
-
-    if len(san_summary_df) > 0:
-        for i, row in san_summary_df.iterrows():
-            r = ph + 1 + list(san_summary_df.index).index(i)
-            row_bg = LGRAY if r % 2 == 0 else "FFFFFF"
-            ws1.row_dimensions[r].height = 18
-            _data_cell(ws1, r, 1, row.get('San', ''), bold=True, bg=row_bg, fg=DARK)
-            _data_cell(ws1, r, 2, row.get('Tien_ve_TK', 0), fmt="#,##0₫", bg=row_bg, fg=BLUE, center=True)
-            _data_cell(ws1, r, 3, row.get('Tong_gia_von', 0), fmt="#,##0₫", bg=row_bg, fg=PURPLE, center=True)
-            ln_v = row.get('Loi_nhuan', 0)
-            _data_cell(ws1, r, 4, ln_v, fmt="#,##0₫", bg=row_bg,
-                       fg=GREEN if ln_v >= 0 else RED, center=True)
-            bien_v = row.get('Bien_LN', 0) / 100 if 'Bien_LN' in row else 0
-            _data_cell(ws1, r, 5, bien_v, fmt="0.0%", bg=row_bg, center=True,
-                       fg=GREEN if bien_v >= 0 else RED)
-
-    _set_col_widths(ws1, {'A': 28, 'B': 18, 'C': 18, 'D': 18, 'E': 14,
-                          'F': 2, 'G': 2, 'H': 2, 'I': 2})
-    _freeze(ws1, "A9")
-
-    # ─────────────────────────────────────
-    # SHEET 2 – CHI TIẾT GIAO DỊCH
-    # ─────────────────────────────────────
-    ws2 = wb.create_sheet("Chi tiet")
-    _sheet_no_grid(ws2)
-    _freeze(ws2, "A3")
-
-    ws2.merge_cells("A1:K1")
-    tc2 = ws2["A1"]
-    tc2.value = "📋  CHI TIẾT GIAO DỊCH"
-    tc2.font = Font(name="Arial", bold=True, size=12, color="FFFFFF")
-    tc2.fill = PatternFill("solid", start_color=DARK)
-    tc2.alignment = Alignment(horizontal="center", vertical="center")
-    ws2.row_dimensions[1].height = 30
-
-    col_defs = [
-        ("Sàn",           'San',           None,        12),
-        ("Tháng",         'Thang_label',   None,        14),
-        ("Tên Hàng Hóa",  'Ten_hang_hoa',  None,        40),
-        ("Khách Hàng",    'Khach_hang',    None,        22),
-        ("Số Lượng",      'So_luong',      "#,##0",     12),
-        ("Giá Vốn/SP",    'Gia_von',       "#,##0₫",    14),
-        ("Tổng Giá Vốn",  'Tong_gia_von',  "#,##0₫",    16),
-        ("Tiền Về TK",    'Tien_ve_TK',    "#,##0₫",    16),
-        ("Lợi Nhuận",     'Loi_nhuan',     "#,##0₫",    16),
-        ("Loại Hàng",     'La_hang_tang',  None,        12),
-        ("Trạng Thái",    'Trang_thai',    None,        14),
-    ]
-
-    for ci, (h, _, _, _) in enumerate(col_defs):
-        _header_cell(ws2, 2, ci + 1, h, bg=DARK, size=9)
-    ws2.row_dimensions[2].height = 22
-
-    for ri, (_, row) in enumerate(filtered_df.iterrows()):
-        r = ri + 3
-        ws2.row_dimensions[r].height = 16
-        row_bg = LGRAY if ri % 2 == 0 else "FFFFFF"
-        for ci, (_, field, fmt, _) in enumerate(col_defs):
-            val = row.get(field, "")
-            if field == 'La_hang_tang':
-                val = "🎁 Tặng" if val else "✅ Bán"
-            fg_clr = "111827"
-            if field == 'Loi_nhuan':
-                fg_clr = DKGRN if (val or 0) >= 0 else DKRED
-            _data_cell(ws2, r, ci + 1, val, fmt=fmt, bg=row_bg, fg=fg_clr,
-                       center=(field in ['So_luong','La_hang_tang','Trang_thai']))
-
-    for ci, (_, _, _, w) in enumerate(col_defs):
-        ws2.column_dimensions[get_column_letter(ci + 1)].width = w
-
-    # ─────────────────────────────────────
-    # SHEET 3 – THEO SÀN
-    # ─────────────────────────────────────
-    ws3 = wb.create_sheet("Theo san")
-    _sheet_no_grid(ws3)
-
-    ws3.merge_cells("A1:G1")
-    tc3 = ws3["A1"]
-    tc3.value = "🏪  HIỆU SUẤT THEO SÀN TMĐT"
-    tc3.font = Font(name="Arial", bold=True, size=12, color="FFFFFF")
-    tc3.fill = PatternFill("solid", start_color=DARK)
-    tc3.alignment = Alignment(horizontal="center", vertical="center")
-    ws3.row_dimensions[1].height = 30
-
-    san_cols = [
-        ("Sàn TMĐT",     'San',        None,     18),
-        ("Tiền Về TK",   'Tien_ve_TK', "#,##0₫", 18),
-        ("Tổng GV",      'Tong_gia_von',"#,##0₫", 18),
-        ("Lợi Nhuận",    'Loi_nhuan',  "#,##0₫", 18),
-        ("Biên LN%",     'Bien_LN',    "0.0%",   12),
-        ("Sản Lượng",    'So_luong',   "#,##0",  14),
-        ("Số Dòng SP",   'So_dong',    "#,##0",  12),
-    ]
-    for ci, (h, _, _, _) in enumerate(san_cols):
-        _header_cell(ws3, 2, ci + 1, h, bg=DARK, size=9)
-    ws3.row_dimensions[2].height = 22
-
-    if len(san_summary_df) > 0:
-        for ri, (_, row) in enumerate(san_summary_df.iterrows()):
-            r = ri + 3
-            ws3.row_dimensions[r].height = 20
-            row_bg = LGRAY if ri % 2 == 0 else "FFFFFF"
-            for ci, (_, field, fmt, _) in enumerate(san_cols):
-                val = row.get(field, 0)
-                if field == 'Bien_LN':
-                    val = (val or 0) / 100
-                fg_clr = "111827"
-                if field in ('Loi_nhuan', 'Bien_LN'):
-                    fg_clr = DKGRN if (val or 0) >= 0 else DKRED
-                elif field == 'San':
-                    fg_clr = DARK
-                _data_cell(ws3, r, ci + 1, val, fmt=fmt, bg=row_bg, fg=fg_clr,
-                           bold=(field == 'San'),
-                           center=(field != 'San' and field != 'Ten_hang_hoa'))
-
-    for ci, (_, _, _, w) in enumerate(san_cols):
-        ws3.column_dimensions[get_column_letter(ci + 1)].width = w
-    _freeze(ws3, "A3")
-
-    # ─────────────────────────────────────
-    # SHEET 4 – THEO THÁNG
-    # ─────────────────────────────────────
-    if monthly_df is not None and len(monthly_df) > 0:
-        ws4 = wb.create_sheet("Theo thang")
-        _sheet_no_grid(ws4)
-
-        ws4.merge_cells("A1:H1")
-        tc4 = ws4["A1"]
-        tc4.value = "📅  PHÂN TÍCH THEO THÁNG"
-        tc4.font = Font(name="Arial", bold=True, size=12, color="FFFFFF")
-        tc4.fill = PatternFill("solid", start_color=DARK)
-        tc4.alignment = Alignment(horizontal="center", vertical="center")
-        ws4.row_dimensions[1].height = 30
-
-        m_cols = [
-            ("Tháng",       'Thang_label', None,     16),
-            ("Tiền Về TK",  'Tien_ve_TK',  "#,##0₫", 18),
-            ("Tổng GV",     'Tong_gia_von', "#,##0₫", 18),
-            ("Lợi Nhuận",   'Loi_nhuan',   "#,##0₫", 18),
-            ("Biên LN%",    'Bien_LN',     "0.0%",   12),
-            ("Sản Lượng",   'So_luong',    "#,##0",  14),
-            ("ΔDT vs Tháng Trước", None,   "0.0%",   16),
-            ("ΔLN vs Tháng Trước", None,   "0.0%",   16),
-        ]
-        for ci, (h, _, _, _) in enumerate(m_cols):
-            _header_cell(ws4, 2, ci + 1, h, bg=DARK, size=9)
-        ws4.row_dimensions[2].height = 22
-
-        df_m = monthly_df.sort_values('Thang_key').reset_index(drop=True)
-        for ri, row in df_m.iterrows():
-            r = ri + 3
-            ws4.row_dimensions[r].height = 20
-            row_bg = LGRAY if ri % 2 == 0 else "FFFFFF"
-
-            prev_tv = df_m.iloc[ri - 1]['Tien_ve_TK'] if ri > 0 else None
-            prev_ln = df_m.iloc[ri - 1]['Loi_nhuan']  if ri > 0 else None
-            delta_tv = (row['Tien_ve_TK'] - prev_tv) / abs(prev_tv) if prev_tv else None
-            delta_ln = (row['Loi_nhuan']  - prev_ln) / abs(prev_ln) if prev_ln else None
-
-            row_vals = [
-                row.get('Thang_label', ''),
-                row.get('Tien_ve_TK', 0),
-                row.get('Tong_gia_von', 0),
-                row.get('Loi_nhuan', 0),
-                (row.get('Bien_LN', 0) or 0) / 100,
-                row.get('So_luong', 0),
-                delta_tv,
-                delta_ln,
-            ]
-            for ci, (_, field, fmt, _) in enumerate(m_cols):
-                val = row_vals[ci]
-                fg_clr = "111827"
-                if field == 'Loi_nhuan' or ci in (4, 6, 7):
-                    fg_clr = DKGRN if (val or 0) >= 0 else DKRED
-                elif field == 'Thang_label':
-                    fg_clr = DARK
-                _data_cell(ws4, r, ci + 1, val, fmt=fmt, bg=row_bg, fg=fg_clr,
-                           bold=(ci == 0), center=(ci > 0))
-
-        for ci, (_, _, _, w) in enumerate(m_cols):
-            ws4.column_dimensions[get_column_letter(ci + 1)].width = w
-        _freeze(ws4, "A3")
-
-    # ─────────────────────────────────────
-    # SHEET 5 – HOÀN HÀNG
-    # ─────────────────────────────────────
-    if len(hoan_df) > 0:
-        ws5 = wb.create_sheet("Hoan hang")
-        _sheet_no_grid(ws5)
-
-        ws5.merge_cells("A1:F1")
-        tc5 = ws5["A1"]
-        tc5.value = "↩️  CHI TIẾT ĐƠN HÀNG HOÀN"
-        tc5.font = Font(name="Arial", bold=True, size=12, color="FFFFFF")
-        tc5.fill = PatternFill("solid", start_color="7F1D1D")
-        tc5.alignment = Alignment(horizontal="center", vertical="center")
-        ws5.row_dimensions[1].height = 30
-
-        h_cols = [
-            ("Sàn",          'San',         None,     12),
-            ("Tên Hàng",     'Ten_hang',    None,     36),
-            ("Số Lượng",     'So_luong',    "#,##0",  12),
-            ("Giá Vốn/SP",   'Gia_von',     "#,##0₫", 14),
-            ("Tổng GV Hoàn", 'Tong_gia_von',"#,##0₫", 16),
-            ("Tháng",        'Thang_label', None,     14),
-        ]
-        for ci, (h, _, _, _) in enumerate(h_cols):
-            _header_cell(ws5, 2, ci + 1, h, bg="7F1D1D", size=9)
-        ws5.row_dimensions[2].height = 22
-
-        for ri, (_, row) in enumerate(hoan_df.iterrows()):
-            r = ri + 3
-            ws5.row_dimensions[r].height = 16
-            row_bg = "FFF1F2" if ri % 2 == 0 else "FFFFFF"
-            for ci, (_, field, fmt, _) in enumerate(h_cols):
-                val = row.get(field, "")
-                _data_cell(ws5, r, ci + 1, val, fmt=fmt, bg=row_bg,
-                           fg=(DKRED if field == 'Tong_gia_von' else "111827"),
-                           bold=(field == 'Tong_gia_von'),
-                           center=(field in ['So_luong', 'San']))
-
-        # Summary footer
-        last_r = len(hoan_df) + 4
-        ws5.merge_cells(f"A{last_r}:D{last_r}")
-        _data_cell(ws5, last_r, 1, "TỔNG CỘNG", bold=True, bg="FEE2E2", fg=DKRED, center=True)
-        _data_cell(ws5, last_r, 5, hoan_df['Tong_gia_von'].sum(),
-                   fmt="#,##0₫", bold=True, bg="FEE2E2", fg=DKRED, center=True)
-
-        for ci, (_, _, _, w) in enumerate(h_cols):
-            ws5.column_dimensions[get_column_letter(ci + 1)].width = w
-        _freeze(ws5, "A3")
-
-    # ─────────────────────────────────────
-    # SHEET 6 – SẢN PHẨM TOP
-    # ─────────────────────────────────────
-    if len(sl_df) > 0:
-        ws6 = wb.create_sheet("Top san pham")
-        _sheet_no_grid(ws6)
-
-        ws6.merge_cells("A1:G1")
-        tc6 = ws6["A1"]
-        tc6.value = "🏆  TOP SẢN PHẨM THEO SẢN LƯỢNG"
-        tc6.font = Font(name="Arial", bold=True, size=12, color="FFFFFF")
-        tc6.fill = PatternFill("solid", start_color="1D4ED8")
-        tc6.alignment = Alignment(horizontal="center", vertical="center")
-        ws6.row_dimensions[1].height = 30
-
-        sp_cols = [
-            ("Thương Hiệu", 'Thuong_hieu', None,    18),
-            ("Mã SP",       'Ma_sp',       None,    14),
-            ("Tên Hàng",    'Ten_hang',    None,    40),
-            ("TiktokShop",  'Tiktok',      "#,##0", 14),
-            ("Shopee",      'Shopee',      "#,##0", 14),
-            ("Lazada",      'Lazada',      "#,##0", 14),
-            ("Tổng SL",     'Tong_SL',     "#,##0", 14),
-        ]
-        for ci, (h, _, _, _) in enumerate(sp_cols):
-            _header_cell(ws6, 2, ci + 1, h, bg="1D4ED8", size=9)
-        ws6.row_dimensions[2].height = 22
-
-        top_sl = sl_df[~sl_df.get('La_hang_tang', False)].sort_values('Tong_SL', ascending=False).head(50)
-        for ri, (_, row) in enumerate(top_sl.iterrows()):
-            r = ri + 3
-            ws6.row_dimensions[r].height = 16
-            row_bg = LGRAY if ri % 2 == 0 else "FFFFFF"
-            for ci, (_, field, fmt, _) in enumerate(sp_cols):
-                val = row.get(field, "")
-                is_num = field in ('Tiktok', 'Shopee', 'Lazada', 'Tong_SL')
-                bold_col = field in ('Ten_hang', 'Tong_SL')
-                fg_clr = BLUE if field == 'Tong_SL' else ("111827" if not is_num else "374151")
-                _data_cell(ws6, r, ci + 1, val, fmt=fmt, bg=row_bg, fg=fg_clr,
-                           bold=bold_col, center=is_num)
-
-        for ci, (_, _, _, w) in enumerate(sp_cols):
-            ws6.column_dimensions[get_column_letter(ci + 1)].width = w
-        _freeze(ws6, "A3")
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.getvalue()
-
-
-# ══════════════════════════════════════════════════════════════════════
-# DATA PARSING HELPERS
-# ══════════════════════════════════════════════════════════════════════
-def extract_month_from_filename(filename):
-    name = filename.lower()
-    name = re.sub(r'\.(xlsx?|xls|csv)$', '', name)
-    yr_default = "2024"
-
-    def yr(s):
-        m = re.search(r'(20\d{2})', s)
-        return m.group(1) if m else yr_default
-
-    def result(month_int, year_str):
-        return f"{year_str}-{month_int:02d}", f"Tháng {month_int}/{year_str}"
-
-    m = re.search(r'(20\d{2})[-_\.](0?[1-9]|1[0-2])\b', name)
-    if m: return result(int(m.group(2)), m.group(1))
-    m = re.search(r'\b(0?[1-9]|1[0-2])[-_](20\d{2})\b', name)
-    if m: return result(int(m.group(1)), m.group(2))
-    m = re.search(r'th[aá]ng\s*0?(\d{1,2})', name)
-    if m:
-        mo = int(m.group(1))
-        if 1 <= mo <= 12: return result(mo, yr(name))
-    m = re.search(r'(?<![a-z])t0?(\d{1,2})(?![a-z0-9])', name)
-    if m:
-        mo = int(m.group(1))
-        if 1 <= mo <= 12: return result(mo, yr(name))
-    month_map = {
-        'january':1,'february':2,'march':3,'april':4,'may':5,'june':6,
-        'july':7,'august':8,'september':9,'october':10,'november':11,'december':12,
-        'jan':1,'feb':2,'mar':3,'apr':4,'jun':6,'jul':7,'aug':8,
-        'sep':9,'oct':10,'nov':11,'dec':12
-    }
-    for word, num in sorted(month_map.items(), key=lambda x: -len(x[0])):
-        if re.search(r'\b' + word + r'\b', name): return result(num, yr(name))
-    m = re.search(r'\b(0?[1-9]|1[0-2])\b', name)
-    if m:
-        mo = int(m.group(1))
-        return result(mo, yr(name))
-    return None, filename
-
-
-def parse_sales_sheet(df_raw, san_label):
-    header_row = None
-    for i, row in df_raw.iterrows():
-        vals = str(row.values)
-        if 'STT' in vals and 'Tên hàng hoá' in vals:
-            header_row = i
-            break
-    if header_row is None: return pd.DataFrame()
-    data = df_raw.iloc[header_row + 1:].copy()
-    data.columns = range(len(data.columns))
-    col_map = {0:'STT',1:'Khach_hang',2:'Ma_don_hang',3:'Ma_san_pham',
-               4:'Ten_hang_hoa',5:'So_luong',6:'Gia_von',7:'Tong_gia_von',
-               8:'Tien_ve_TK',9:'Doanh_thu_thuc',10:'Ngay',11:'Loi_nhuan',12:'Trang_thai'}
-    cols = {k: v for k, v in col_map.items() if k < len(data.columns)}
-    df = data[list(cols.keys())].copy()
-    df.columns = list(cols.values())
-    df = df[df['Ten_hang_hoa'].notna() &
-            (df['Ten_hang_hoa'].astype(str).str.strip() != '') &
-            (df['Ten_hang_hoa'].astype(str) != 'nan') &
-            (df['Ten_hang_hoa'].astype(str).str.strip().str.len() > 2)]
-    df['San'] = san_label
-    df['La_hang_tang'] = df['Ma_san_pham'].astype(str).str.endswith('-T', na=False)
-    for col in ['So_luong','Gia_von','Tong_gia_von','Tien_ve_TK','Loi_nhuan']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-    if 'Ngay' in df.columns:
-        df['Ngay'] = pd.to_datetime(df['Ngay'], errors='coerce')
-    df = df[~df['Ten_hang_hoa'].astype(str).str.upper().str.contains('TỔNG|TOTAL', na=False)]
+def get_adj(year, month): return ADJ.get((int(year), int(month)))
+
+
+# =====================================================================================================
+# 2) LÕI TÍNH TOÁN
+# =====================================================================================================
+PVOK = ['Đạt', 'Đợi kết quả', 'Không đạt']
+DATA_COLS = ['STT','KHOI','CN','VITRI','TEN','MAIL','SDT','LINKCV','NGUON','DANHGIA','SOVAN','NGAYPV','GIOPV','NGUOIPV','LH','NGAYLL','DIACHI','KQPV','DGDG','LYDOFAIL','NGAYNV','KQNV','LYDONV','LUONG','TGTV','MANV','NGAYHH','TTHH','RUBY','HHTN','TTLV','NGAYNGHI','PLLD','LYDOCT']
+BUCKETS = ['0 ngày','1–3 ngày','4–10 ngày','11–30 ngày','31–60 ngày','Trên 60 ngày']
+
+# ------------------------------------------------------------------ tiện ích
+def norm(s):
+    if s is None or (isinstance(s, float) and pd.isna(s)): return ''
+    s = str(s).strip().upper().replace('Đ', 'D'); s = unicodedata.normalize('NFD', s)
+    s = ''.join(c for c in s if unicodedata.category(c) != 'Mn')
+    return re.sub(r'\s+', ' ', re.sub(r'[^A-Z0-9 ]', ' ', s)).strip()
+def pdate(x):
+    """Ngày thật giữ nguyên; ô nhập dạng chữ đọc theo dd/mm/yyyy (không để pandas đoán tháng/ngày)."""
+    if x is None or (isinstance(x, float) and pd.isna(x)): return pd.NaT
+    if isinstance(x, str):
+        m = re.search(r'(\d{1,2})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{4})', x)
+        if not m: return pd.NaT
+        try: return pd.Timestamp(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except Exception: return pd.NaT
+    return pd.to_datetime(x, errors='coerce')
+def txt(s):  # chuỗi sạch, ô trống -> None
+    return s.where(s.notna(), None).map(lambda x: str(x).strip() if x is not None and str(x).strip() not in ('', 'nan') else None)
+def pct(a, b): return (a / b * 100.0) if b else np.nan
+def month_range(y, m):
+    s = pd.Timestamp(int(y), int(m), 1); return s, s + pd.offsets.MonthEnd(0)
+def _in(series, s, e): return (series >= s) & (series <= e)
+def bucket(n):
+    return '0 ngày' if n <= 0 else '1–3 ngày' if n <= 3 else '4–10 ngày' if n <= 10 else '11–30 ngày' if n <= 30 else '31–60 ngày' if n <= 60 else 'Trên 60 ngày'
+def _b(x): return io.BytesIO(x) if isinstance(x, (bytes, bytearray)) else x
+KIND_LABEL = {'data': 'TUYỂN DỤNG – DATA', 'kt': 'Kế toán Admin Update', 'master': 'Master Data', 'ads': 'Report Facebook Ads (tùy chọn)'}
+def classify_file(src):
+    """Nhận diện loại file raw theo NỘI DUNG (tên sheet / tiêu đề cột), không phụ thuộc tên file. Trả về (loại, ghi chú) – loại ∈ data/kt/master/ads hoặc None."""
+    try: wb = openpyxl.load_workbook(_b(src), read_only=True, data_only=True)
+    except Exception: return None, 'không mở được (không phải file Excel .xlsx hoặc file bị hỏng)'
+    try:
+        names = list(wb.sheetnames)
+        if 'DATA TUYỂN DỤNG' in names: return 'data', ''
+        if all(n in names for n in ('CHECK LIST NGHỈ VIỆC', 'NGHỈ VIỆC', 'NHẬN VIỆC')): return 'kt', ''
+        if '1. TỔNG DATA - NHÂN SỰ' in names: return 'master', ''
+        hdr = next(wb[names[0]].iter_rows(min_row=1, max_row=1, values_only=True), ())
+        h = [norm(str(c)) for c in hdr if c is not None]
+        if any(x.startswith('NGAY') for x in h) and any(('CHI TIEU' in x or 'SPENT' in x or 'AMOUNT' in x) for x in h): return 'ads', ''
+        return None, 'không nhận ra loại file (sheet: ' + ', '.join(n.strip() for n in names[:4]) + ')'
+    except Exception as ex: return None, f'không đọc được cấu trúc ({type(ex).__name__})'
+    finally:
+        try: wb.close()
+        except Exception: pass
+def find_files(folder):
+    """Tìm file raw trong thư mục theo NỘI DUNG (không theo tên); nếu có nhiều file cùng loại lấy file mới nhất."""
+    best = {}
+    for f in glob.glob(os.path.join(folder, '*.xlsx')):
+        if os.path.basename(f).startswith('~$'): continue
+        kind, _ = classify_file(f)
+        if kind and (kind not in best or os.path.getmtime(f) > os.path.getmtime(best[kind])): best[kind] = f
+    return best
+
+# ------------------------------------------------------------------ đọc raw
+def kt_block(src, sheet, ncols):
+    ws = openpyxl.load_workbook(_b(src), data_only=True)[sheet]; out = []
+    for r in ws.iter_rows(values_only=True):
+        if isinstance(r[0], str) and re.match(r'^\s*TU[ẤẦ]N\s*\d+', r[0].upper()): continue
+        if r[1] == 'TÌNH TRẠNG' or r[0] == 'Chi nhánh' or all(c is None for c in r[:ncols]): continue
+        out.append(tuple(r[:ncols]))
+    return out
+def _open_xl(src, label, sheets):
+    """Mở file Excel và báo lỗi tiếng Việt rõ ràng nếu thiếu sheet (thường do chọn nhầm file)."""
+    try: xl = pd.ExcelFile(_b(src))
+    except Exception: raise ValueError(f'Không mở được file {label} (có thể không phải file Excel .xlsx hoặc file bị hỏng).')
+    miss = [n for n in sheets if n not in xl.sheet_names]
+    if miss: raise ValueError(f"File {label} không có sheet {', '.join(repr(m) for m in miss)}. Sheet hiện có: {', '.join(xl.sheet_names[:12])}. Có phải bạn chọn nhầm file?")
+    return xl
+def _check_headers(cols, expect, label):
+    bad = []
+    for i, tok in expect.items():
+        have = norm(str(cols[i]).replace('\n', ' ')) if i < len(cols) else '(thiếu cột)'
+        if tok not in have: bad.append(f"cột {i + 1} là '{str(cols[i]).strip() if i < len(cols) else ''}' (cần chứa '{tok}')")
+    if bad: raise ValueError(f'Cấu trúc cột của {label} khác mẫu: ' + '; '.join(bad) + '. App cần đúng thứ tự cột như file gốc.')
+def load_raw(data, kt, master, ads=None):
+    """data/kt/master/ads: đường dẫn hoặc bytes. Báo ValueError tiếng Việt nếu file sai sheet/cột."""
+    xd = _open_xl(data, 'TUYỂN DỤNG - DATA', ['DATA TUYỂN DỤNG'])
+    d = pd.read_excel(xd, sheet_name='DATA TUYỂN DỤNG', header=0)
+    if d.shape[1] < 34: raise ValueError(f"Sheet 'DATA TUYỂN DỤNG' chỉ có {d.shape[1]} cột (cần ít nhất 34). Có phải bạn chọn nhầm file?")
+    d = d.iloc[:, :34]
+    _check_headers(list(d.columns), {1: 'KHOI', 2: 'CHI NHANH', 3: 'VI TRI', 4: 'TEN', 8: 'NGUON', 9: 'DANH GIA', 11: 'NGAY PV', 15: 'LIEN LAC', 17: 'KET QUA', 20: 'NHAN VIEC', 21: 'KET QUA NHAN VIEC', 23: 'LUONG', 31: 'NGHI VIEC'}, "sheet DATA TUYỂN DỤNG")
+    d.columns = DATA_COLS
+    d = d.dropna(subset=['TEN']).copy()
+    if not len(d): raise ValueError("Sheet 'DATA TUYỂN DỤNG' không có dòng dữ liệu nào.")
+    dq = {}
+    for c in ['NGAYPV', 'NGAYLL', 'NGAYNV', 'NGAYNGHI']:
+        d[c + '_d'] = d[c].map(pdate)
+        dq['text_' + c] = int((d[c].map(lambda v: isinstance(v, str)) & d[c + '_d'].notna()).sum())   # ô ngày nhập dạng chữ đã đọc được
+    for c in ['KHOI', 'CN', 'VITRI', 'NGUON', 'LH', 'KQPV', 'KQNV', 'TTLV', 'DANHGIA', 'NGUOIPV', 'LUONG']: d[c] = txt(d[c])
+    d['NGUON'] = d.NGUON.fillna('(không ghi nguồn)'); d['LH'] = d.LH.fillna('(không ghi người LH)')
+    d['DON_VI'] = d.CN.fillna('(không ghi)'); d['k'] = d.TEN.map(norm)
+    xk = _open_xl(kt, 'KẾ TOÁN ADMIN UPDATE', ['CHECK LIST NGHỈ VIỆC', 'NGHỈ VIỆC', 'NHẬN VIỆC'])
+    ck = pd.read_excel(xk, sheet_name='CHECK LIST NGHỈ VIỆC')
+    _check_headers(list(ck.columns), {0: 'CHI NHANH', 3: 'HO TEN', 7: 'NGAY NHAN VIEC', 9: 'NGAY NGHI VIEC'}, 'sheet CHECK LIST NGHỈ VIỆC (Kế toán)')
+    ck = ck.dropna(subset=[ck.columns[3]]).iloc[:, :11]
+    ck.columns = ['CN', 'TT', 'MSNV', 'TEN', 'BP', 'CV', 'CD', 'NNV', 'NCTV', 'NNGHI', 'LYDO']
+    kq = pd.DataFrame(kt_block(kt, 'NGHỈ VIỆC', 9), columns=['CN', 'TT', 'TEN', 'CV', 'NNV', 'NNGHI', 'x', 'CRM', 'NLV'])
+    kn = pd.DataFrame(kt_block(kt, 'NHẬN VIỆC', 6), columns=['CN', 'TT', 'TEN', 'CV', 'NNV', 'CRM'])
+    xm = _open_xl(master, 'MASTER DATA', ['1. TỔNG DATA - NHÂN SỰ'])
+    ms = pd.read_excel(xm, sheet_name='1. TỔNG DATA - NHÂN SỰ', usecols=range(0, 12))
+    _check_headers(list(ms.columns), {0: 'CHI NHANH', 3: 'HO TEN', 7: 'NGAY NHAN VIEC', 9: 'NGAY NGHI VIEC'}, 'sheet 1. TỔNG DATA - NHÂN SỰ (Master)')
+    ms.columns = ['CN', 'TT', 'MSNV', 'TEN', 'BP', 'CV', 'CD', 'NNV', 'NCTV', 'NNGHI', 'LYDO', 'NDC']; ms = ms.dropna(subset=['TEN']).copy()
+    for df in (ck, kq, kn, ms):
+        df['NNV_d'] = df.NNV.map(pdate); df['k'] = df.TEN.map(norm)
+        if 'NNGHI' in df: df['NNGHI_d'] = df.NNGHI.map(pdate)
+    a = None
+    if ads is not None:
+        a = pd.read_excel(_b(ads)); a = a.iloc[:, :6]; a.columns = ['ngay', 'ad', 'cur', 'spend', 'msg', 'cpm']
+        a['ngay'] = pd.to_datetime(a.ngay, errors='coerce'); a['spend'] = pd.to_numeric(a.spend, errors='coerce').fillna(0); a['msg'] = pd.to_numeric(a.msg, errors='coerce').fillna(0)
+        a = a.dropna(subset=['ngay'])
+    dq['master_nghi_khong_ngay'] = int((ms.TT.isin(['Đã nghỉ việc', 'Nghỉ ngang', 'Công ty cho nghỉ']) & ms.NNGHI_d.isna()).sum())
+    dq['data_thieu_ngay_lien_lac'] = int(d.NGAYLL_d.isna().sum())
+    pairs = []
+    try:
+        wsb = openpyxl.load_workbook(_b(data), read_only=True, data_only=True)['BC-2026']
+        for b_, c_ in wsb.iter_rows(min_row=34, max_row=245, min_col=2, max_col=3, values_only=True):
+            if b_ is None or c_ is None or str(b_).strip().upper() == 'TỔNG': continue
+            pairs.append((str(b_), str(c_)))
+    except Exception: pairs = []
+    raw = dict(d=d, ck=ck, kq=kq, kn=kn, ms=ms, ads=a, dq=dq, pairs=pairs)
+    raw['nghi_all'] = build_nghi(raw)
+    cands = [d.NGAYLL_d.max(), ms.NNV_d.max(), ms.NNGHI_d.max(), ck.NNGHI_d.max(), kq.NNGHI_d.max()]
+    today = pd.Timestamp.today().normalize()   # bỏ qua ngày dự kiến trong tương lai (vd. ngày nghỉ đã báo trước)
+    raw['cutoff'] = min(max([c for c in cands if pd.notna(c)] or [today]), today)
+    return raw
+
+def build_nghi(raw):
+    """Hợp mọi người có ngày nghỉ ở Master / CHECK LIST / NGHỈ VIỆC (gộp theo tên + ngày nhận việc ±7 ngày)."""
+    pers = {}
+    out = []
+    for src, df in (('Master', raw['ms']), ('CHECK LIST', raw['ck']), ('KT NGHỈ VIỆC', raw['kq'])):
+        for r in df[df.NNGHI_d.notna()].itertuples(index=False):
+            k = r.k; nnv = r.NNV_d; hit = None
+            for p in pers.get(k, []):
+                if pd.isna(nnv) or pd.isna(p['NNV']) or abs((nnv - p['NNV']).days) <= 7:
+                    if abs((r.NNGHI_d - p['NNGHI']).days) <= 40: hit = p; break
+            g = lambda n: getattr(r, n, None)
+            if hit:
+                hit['src'].add(src); hit['dates'].add(r.NNGHI_d)
+                for kk, vv in (('MSNV', g('MSNV')), ('BP', g('BP')), ('CV', g('CV')), ('LYDO', g('LYDO')), ('TT', g('TT'))):
+                    if (hit.get(kk) is None or (isinstance(hit.get(kk), float) and pd.isna(hit.get(kk)))) and vv is not None and not (isinstance(vv, float) and pd.isna(vv)): hit[kk] = vv
+                if pd.isna(hit['NNV']): hit['NNV'] = nnv
+                continue
+            p = dict(k=k, TEN=r.TEN, CN=r.CN, NNV=nnv, NNGHI=r.NNGHI_d, MSNV=g('MSNV'), TT=g('TT'), BP=g('BP'), CV=g('CV'), LYDO=g('LYDO'), src={src}, dates={r.NNGHI_d})
+            pers.setdefault(k, []).append(p); out.append(p)
+    n = pd.DataFrame(out)
+    if n.empty: return n
+    n['LECH_NGAY'] = n.dates.map(lambda x: len(x) > 1); n['LECH_THANG'] = n.dates.map(lambda x: len({(t.year, t.month) for t in x}) > 1)
+    n = n.drop(columns=['dates'])
+    n['src'] = n.src.map(lambda s: ', '.join(sorted(s)))
+    n['days'] = (n.NNGHI - n.NNV).dt.days
+    for c in ['CN', 'TT', 'BP', 'CV', 'LYDO']: n[c] = txt(n[c].astype(object))
+    n['CN'] = n.CN.fillna('(không ghi)')
+    n['NHOM'] = n.days.map(lambda x: bucket(x) if pd.notna(x) else None)
+    return n
+
+# ------------------------------------------------------------------ phân tích tuyển dụng
+def agg_by(d, key, s, e, delta=None):
+    g = d.assign(_k=d[key])
+    cv = g[_in(g.NGAYLL_d, s, e)].groupby('_k').size()
+    pvm = _in(g.NGAYPV_d, s, e)
+    pv = g[pvm & g.KQPV.isin(PVOK)].groupby('_k').size(); ps = g[pvm & (g.KQPV == 'Đạt')].groupby('_k').size()
+    kd = g[pvm & (g.KQPV == 'Không đạt')].groupby('_k').size(); ns = g[pvm & (g.KQPV == 'Không đến pv')].groupby('_k').size()
+    nvm = _in(g.NGAYNV_d, s, e)
+    nv = g[nvm & (g.KQNV == 'Đã nhận việc')].groupby('_k').size(); knv = g[nvm & (g.KQNV == 'Không nhận việc')].groupby('_k').size()
+    t = pd.concat({'CV': cv, 'PV': pv, 'PASS': ps, 'KHONG_DAT': kd, 'KHONG_DEN_PV': ns, 'NV': nv, 'KHONG_NV': knv}, axis=1).fillna(0).astype(int)
+    t.index.name = key
+    # đợt CV tháng này: kết quả cuối cùng của đúng những người liên lạc trong tháng
+    c = g[_in(g.NGAYLL_d, s, e)]
+    co = pd.concat({'CV_DOT': c.groupby('_k').size(), 'DOT_PV': c[c.KQPV.isin(PVOK)].groupby('_k').size(), 'DOT_PASS': c[c.KQPV == 'Đạt'].groupby('_k').size(), 'DOT_NV': c[c.KQNV == 'Đã nhận việc'].groupby('_k').size()}, axis=1).fillna(0).astype(int)
+    t = t.join(co, how='outer').fillna(0).astype(int)
+    for (g_, mm_), v_ in (delta or {}).items():
+        if g_ not in t.index: t.loc[g_] = 0
+        t.loc[g_, mm_] = int(t.loc[g_, mm_]) + int(v_)
+    t = t.astype(int); t.index.name = key
+    t['%PV/CV'] = [pct(a, b) for a, b in zip(t.PV, t.CV)]
+    t['%Pass/PV'] = [pct(a, b) for a, b in zip(t.PASS, t.PV)]
+    t['%NV/Pass'] = [pct(a, b) for a, b in zip(t.NV, t.PASS)]
+    t['%NV/CV'] = [pct(a, b) for a, b in zip(t.NV, t.CV)]
+    t['%Không đến PV'] = [pct(a, b) for a, b in zip(t.KHONG_DEN_PV, t.PV + t.KHONG_DEN_PV)]
+    t['%Đợt CV→PV'] = [pct(a, b) for a, b in zip(t.DOT_PV, t.CV_DOT)]
+    t['%Đợt CV→Pass'] = [pct(a, b) for a, b in zip(t.DOT_PASS, t.CV_DOT)]
+    t['%Đợt CV→NV'] = [pct(a, b) for a, b in zip(t.DOT_NV, t.CV_DOT)]
+    tot = t[['CV', 'PV', 'PASS', 'KHONG_DAT', 'KHONG_DEN_PV', 'NV', 'KHONG_NV', 'CV_DOT', 'DOT_PV', 'DOT_PASS', 'DOT_NV']].sum()
+    t['%Tỷ trọng NV'] = [pct(a, tot['NV']) for a in t.NV]
+    t['%Tỷ trọng CV'] = [pct(a, tot['CV']) for a in t.CV]
+    t = t[(t[['CV', 'PV', 'PASS', 'NV', 'KHONG_NV', 'KHONG_DEN_PV']].sum(axis=1) > 0)]
+    return t.sort_values(['NV', 'CV'], ascending=False)
+
+REASON_RULES = [('Gia đình / cá nhân / về quê', ['gia dinh', 'ca nhan', 've que', 'dam cuoi', 'co con', 'mang thai', 'sinh', 'chong', 'vo ', 'ba ', 'me ']),
+    ('Sức khỏe', ['suc khoe', 'benh', 'dau', 'om ']), ('Công việc không phù hợp / áp lực KPI', ['cong viec', 'ap luc', 'kpi', 'doanh so', 'khong phu hop', 'ko phu hop', 'chua phu hop']),
+    ('Môi trường / đồng nghiệp / quản lý', ['moi truong', 'dong nghiep', 'quan ly', 'khong hop']), ('Khoảng cách / đi lại / chi nhánh', ['khoang cach', 'di lai', 'xa ', 'chi nhanh', 'dieu chuyen']),
+    ('Học tập / thi cử', ['hoc', 'thi ']), ('Công ty cho nghỉ / không đạt', ['cty cho nghi', 'cong ty cho nghi', 'khong dat', 'cho thoi viec', 'cpl']),
+    ('Bỏ việc / không liên hệ được', ['bo viec', 'nghi ngang', 'khong lien he', 'khong lien lac', 'ko lien'])]
+def reason_group(t):
+    if t is None or (isinstance(t, float) and pd.isna(t)) or not str(t).strip(): return '(không ghi lý do)'
+    n = ' ' + norm(t).lower() + ' '
+    for name, kws in REASON_RULES:
+        if any(k in n for k in kws): return name
+    return 'Khác'
+
+BRANCHES = ['QUẬN 1', 'PHÚ NHUẬN', 'TÂN BÌNH', 'GÒ VẤP', 'QUẬN 10', 'TÂN PHÚ', 'BÌNH TÂN', 'VŨNG TÀU', 'BÌNH DƯƠNG', 'THỦ ĐỨC']
+DEPTS = ['MKT', 'SO', 'HCNS', 'KẾ TOÁN', 'VẬN HÀNH', 'DỰ ÁN']
+DEPT_METRICS = ['Số CV', 'Tham gia PV', 'Đạt PV', 'Không đạt PV', 'Đã NV', 'Không nhận việc']
+
+def dept_table(raw, s, e, delta=None):
+    """Bảng phòng ban / chi nhánh đúng định nghĩa báo cáo: chỉ tính các (chi nhánh, vị trí) có trong danh sách của sheet BC-2026."""
+    pairs = raw.get('pairs') or []
+    if not pairs: return pd.DataFrame()
+    d = raw['d']; low_cn = d.DON_VI.fillna('').str.lower(); low_vt = d.VITRI.fillna('').str.lower(); acc = {}
+    for b_, c_ in pairs:
+        x = d[(low_cn == b_.lower()) & (low_vt == c_.lower())]
+        v = dict(CV=int(_in(x.NGAYLL_d, s, e).sum()), PV=int((_in(x.NGAYPV_d, s, e) & x.KQPV.isin(PVOK)).sum()), DAT=int((_in(x.NGAYPV_d, s, e) & (x.KQPV == 'Đạt')).sum()),
+                 KDAT=int((_in(x.NGAYPV_d, s, e) & (x.KQPV == 'Không đạt')).sum()), NV=int((_in(x.NGAYNV_d, s, e) & (x.KQNV == 'Đã nhận việc')).sum()), KNV=int((_in(x.NGAYNV_d, s, e) & (x.KQNV == 'Không nhận việc')).sum()))
+        g_ = b_.upper(); acc.setdefault(g_, dict(CV=0, PV=0, DAT=0, KDAT=0, NV=0, KNV=0))
+        for k_, vv in v.items(): acc[g_][k_] += vv
+    for (g_, k_), vv in (delta or {}).items(): acc.setdefault(g_, dict(CV=0, PV=0, DAT=0, KDAT=0, NV=0, KNV=0))[k_] += vv
+    z = dict(CV=0, PV=0, DAT=0, KDAT=0, NV=0, KNV=0)
+    t = pd.DataFrame({g_: acc.get(g_, z) for g_ in DEPTS + BRANCHES}); t.index = DEPT_METRICS
+    t['TỔNG PHÒNG BAN'] = t[DEPTS].sum(axis=1); t['TỔNG 10 CHI NHÁNH'] = t[BRANCHES].sum(axis=1)
+    return t
+
+def dat_thu_viec(raw, s, e, adj=None):
+    """Người hết thử việc trong tháng và còn làm việc (theo ngày cuối thử việc của Master)."""
+    adj = adj or {}; ms = raw['ms'].copy(); ms['NCTV_d'] = ms.NCTV.map(pdate)
+    extra = set((adj.get('dat_thu_viec_bo_sung') or {}).keys())
+    dt = ms[_in(ms.NCTV_d, s, e) & ((ms.TT == 'Đang làm việc') | ms.MSNV.isin(extra))].copy()
+    ov = adj.get('cn_ghi_de') or {}
+    dt['CN_BC'] = dt.apply(lambda x: ov.get(norm(x.TEN), x.CN), axis=1)
+    dt['NHOM'] = dt.CN_BC.map(lambda v: 'VĂN PHÒNG' if norm(v) == 'VAN PHONG' else str(v).strip().upper())
+    cnt = {'VĂN PHÒNG': int((dt.NHOM == 'VĂN PHÒNG').sum())}
+    for b_ in BRANCHES: cnt[b_] = int((dt.NHOM.map(norm) == norm(b_)).sum())
+    ser = pd.Series(cnt, name='Số người'); ser['TỔNG'] = int(ser.sum())
+    return ser, dt
+
+def branch_table(R, dau_ky=None, sl_yc=None):
+    """Bảng biến động nhân sự theo chi nhánh đúng bố cục báo cáo (Đầu kỳ / SL yêu cầu nhập tay)."""
+    nv = R['nv_list']; ng = R['nghi_list']; rows = []
+    for b_ in BRANCHES:
+        t = int(((nv.CN.map(norm) == norm(b_)) & (nv.KHOI != 'Văn Phòng')).sum()) if len(nv) else 0
+        m_ = ng[ng.CN.map(norm) == norm(b_)] if len(ng) else ng
+        ct = int((m_.days >= 30).sum()) if len(m_) else 0; tv = int((m_.days < 30).sum()) if len(m_) else 0
+        dk = (dau_ky or {}).get(b_); sl = (sl_yc or {}).get(b_)
+        rows.append({'Chi nhánh': b_, 'Đầu kỳ': dk, 'SL yêu cầu': sl, 'Tuyển mới': t, 'Nghỉ chính thức': ct, 'Nghỉ thử việc': tv, 'Tổng nghỉ': ct + tv,
+                     'Cuối kỳ': (dk + t - ct - tv) if dk is not None else np.nan})
+    df = pd.DataFrame(rows).set_index('Chi nhánh'); df['Net HC'] = df['Cuối kỳ'] - df['Đầu kỳ']
+    df['% Tuyển mới / SL yêu cầu'] = [pct(a, b) if (b is not None and b == b and b > 0) else np.nan for a, b in zip(df['Tuyển mới'], df['SL yêu cầu'])]
+    df['% Nghỉ / Đầu kỳ'] = [pct(a, b) if (b is not None and b == b and b > 0) else np.nan for a, b in zip(df['Tổng nghỉ'], df['Đầu kỳ'])]
+    tot = df.drop(columns=['% Tuyển mới / SL yêu cầu', '% Nghỉ / Đầu kỳ', 'Net HC']).sum(numeric_only=True); tot.name = 'TỔNG'
+    out = pd.concat([df, tot.to_frame().T]); out.loc['TỔNG', 'Net HC'] = out.loc['TỔNG', 'Cuối kỳ'] - out.loc['TỔNG', 'Đầu kỳ']
+    out.loc['TỔNG', '% Tuyển mới / SL yêu cầu'] = pct(out.loc['TỔNG', 'Tuyển mới'], out.loc['TỔNG', 'SL yêu cầu']); out.loc['TỔNG', '% Nghỉ / Đầu kỳ'] = pct(out.loc['TỔNG', 'Tổng nghỉ'], out.loc['TỔNG', 'Đầu kỳ'])
+    out.index.name = 'Chi nhánh'
+    return out
+
+def compute_month(raw, y, m, cost_manual=None, adjust=None):
+    """adjust: khối điều chỉnh (dieu_chinh.get(y, m)) để khớp báo cáo đã duyệt; None = số thuần từ raw."""
+    s, e = month_range(y, m); d = raw['d']; nga = raw['nghi_all']; adj = adjust or {}
+    R = dict(year=int(y), month=int(m), start=s, end=e, adjusted=bool(adjust), adj=adj)
+    in_cv = _in(d.NGAYLL_d, s, e); pvm = _in(d.NGAYPV_d, s, e); nvm = _in(d.NGAYNV_d, s, e)
+    T = dict(CV=int(in_cv.sum()), PV=int((pvm & d.KQPV.isin(PVOK)).sum()), PASS=int((pvm & (d.KQPV == 'Đạt')).sum()),
+             KHONG_DAT=int((pvm & (d.KQPV == 'Không đạt')).sum()), DOI_KQ=int((pvm & (d.KQPV == 'Đợi kết quả')).sum()), KHONG_DEN_PV=int((pvm & (d.KQPV == 'Không đến pv')).sum()),
+             NV=int((nvm & (d.KQNV == 'Đã nhận việc')).sum()), KHONG_NV=int((nvm & (d.KQNV == 'Không nhận việc')).sum()))
+    R['funnel_raw'] = dict(T)
+    dh = adj.get('delta_hr') or {}
+    for k_, m_ in (('PV', 'PV'), ('PASS', 'PASS'), ('NV', 'NV')): T[k_] += sum(v for (g_, mm), v in dh.items() if mm == m_)
+    T['KHONG_NV'] += sum(v for (g_, mm), v in (adj.get('delta_nguon') or {}).items() if mm == 'KHONG_NV')
+    R['funnel'] = T
+    R['has_data'] = T['CV'] > 0 or T['NV'] > 0
+    R['by_source'] = agg_by(d, 'NGUON', s, e, adj.get('delta_nguon')); R['by_hr'] = agg_by(d, 'LH', s, e, adj.get('delta_hr')); R['by_unit'] = agg_by(d, 'DON_VI', s, e, adj.get('delta_unit')); R['by_pos'] = agg_by(d, 'VITRI', s, e)
+    kh = d.assign(KHOI=d.KHOI.fillna('(không ghi)')); R['by_khoi'] = agg_by(kh, 'KHOI', s, e)
+    R['dept_report'] = dept_table(raw, s, e, adj.get('delta_dept'))
+    # ---- nhận việc chi tiết + giữ chân
+    nv = d[nvm & (d.KQNV == 'Đã nhận việc')][['TEN', 'k', 'KHOI', 'CN', 'VITRI', 'NGUON', 'LH', 'NGAYNV_d']].rename(columns={'NGAYNV_d': 'NNV'}).copy()
+    qd = []
+    for r in nv.itertuples(index=False):
+        c = nga[(nga.k == r.k) & ((nga.NNV - r.NNV).abs() <= pd.Timedelta(days=7))] if len(nga) else nga
+        qd.append(int((c.iloc[0].NNGHI - r.NNV).days) if len(c) else np.nan)
+    nv['NGAY_DEN_KHI_NGHI'] = qd; nv['NGHI_CHO_BAO_CAO'] = ''
+    tm = adj.get('ten_theo_bao_cao') or {}
+    if tm: nv['TEN'] = nv.TEN.map(lambda t: tm.get(norm(t), t))
+    sup = pd.DataFrame([dict(TEN=x['TEN'], k=norm(x['TEN']), KHOI=x['KHOI'], CN=x['CN'], VITRI=x['VITRI'], NGUON=x['NGUON'], LH=x['LH'], NNV=pd.Timestamp(x['NNV']), NGAY_DEN_KHI_NGHI=np.nan, NGHI_CHO_BAO_CAO='Bổ sung theo báo cáo: ' + x['ly_do']) for x in adj.get('nhan_viec_bo_sung', [])])
+    if len(sup): nv = pd.concat([nv, sup], ignore_index=True)
+    nv['DA_NGHI'] = nv.NGAY_DEN_KHI_NGHI.notna(); nv = nv.rename(columns={'NGHI_CHO_BAO_CAO': 'GHI_CHU'})
+    R['nv_list'] = nv
+    cut = raw['cutoff']; R['cutoff'] = cut
+    R['retention'] = dict(n=len(nv), nghi30=int((nv.NGAY_DEN_KHI_NGHI <= 30).sum()), nghi60=int((nv.NGAY_DEN_KHI_NGHI <= 60).sum()), nghi_all=int(nv.DA_NGHI.sum()),
+                          du_30=(e + pd.Timedelta(days=30) <= cut), du_60=(e + pd.Timedelta(days=60) <= cut))
+    if len(nv):
+        rs = nv.groupby('NGUON').agg(NV=('TEN', 'size'), NGHI=('DA_NGHI', 'sum'), NGHI30=('NGAY_DEN_KHI_NGHI', lambda x: int((x <= 30).sum()))).reset_index()
+        rs['%Đã nghỉ'] = [pct(a, b) for a, b in zip(rs.NGHI, rs.NV)]; rs['%Nghỉ ≤30 ngày'] = [pct(a, b) for a, b in zip(rs.NGHI30, rs.NV)]
+        R['retention_src'] = rs.sort_values('NV', ascending=False)
+    else: R['retention_src'] = pd.DataFrame(columns=['NGUON', 'NV', 'NGHI', 'NGHI30', '%Đã nghỉ', '%Nghỉ ≤30 ngày'])
+    # ---- nghỉ việc
+    ng = nga[_in(nga.NNGHI, s, e)].copy() if len(nga) else nga.copy()
+    R['nghi_excluded'] = ng.iloc[0:0]; R['nghi_total_raw'] = len(ng)
+    lt = {(k_, dt_): why for k_, dt_, why in adj.get('loai_tru_nghi', [])}
+    if len(ng) and lt:
+        mk = ng.apply(lambda r: (r.k, str(r.NNV.date())) in lt if pd.notna(r.NNV) else False, axis=1)
+        R['nghi_excluded'] = ng[mk].assign(LY_DO_LOAI=[lt[(r.k, str(r.NNV.date()))] for r in ng[mk].itertuples(index=False)]); ng = ng[~mk].copy()
+    if len(ng):
+        src = []; lh = []
+        for r in ng.itertuples(index=False):
+            c = d[(d.k == r.k) & (d.KQNV == 'Đã nhận việc')]
+            if pd.notna(r.NNV) and len(c): c = c[(c.NGAYNV_d - r.NNV).abs() <= pd.Timedelta(days=7)]
+            src.append(c.iloc[0].NGUON if len(c) else '(không rõ)'); lh.append(c.iloc[0].LH if len(c) else '(không rõ)')
+        ng['NGUON'] = src; ng['LH'] = lh; ng['LOAI'] = ng.days.map(lambda x: 'Nghỉ thử việc (<30 ngày)' if pd.notna(x) and x < 30 else ('Nghỉ chính thức (≥30 ngày)' if pd.notna(x) else '(thiếu ngày)'))
+        ng['NHOM_LY_DO'] = ng.LYDO.map(reason_group); ng['NHAN_VIEC_CUNG_THANG'] = (ng.NNV >= s)
+    R['nghi_list'] = ng
+    nT = len(ng); R['nghi_total'] = nT
+    if nT:
+        t = ng.NHOM.value_counts().reindex(BUCKETS).fillna(0).astype(int).to_frame('So_nguoi'); t['%'] = [pct(a, nT) for a in t.So_nguoi]; t['% cộng dồn'] = t['%'].cumsum(); R['tenure'] = t
+        u = ng.groupby('CN').agg(NGHI=('TEN', 'size'), NGHI_TV=('days', lambda x: int((x < 30).sum()))).sort_values('NGHI', ascending=False); u['%Tỷ trọng'] = [pct(a, nT) for a in u.NGHI]; u['%Nghỉ thử việc'] = [pct(a, b) for a, b in zip(u.NGHI_TV, u.NGHI)]; R['nghi_unit'] = u
+        v = ng.groupby(ng.CV.fillna('(không ghi)')).size().sort_values(ascending=False).to_frame('NGHI'); v['%'] = [pct(a, nT) for a in v.NGHI]; R['nghi_pos'] = v
+        if adj.get('ly_do_nhom'):
+            w = pd.Series(adj['ly_do_nhom']).to_frame('So_nguoi'); w['%'] = [pct(a, nT) for a in w.So_nguoi]; R['reason_manual'] = True
+        else:
+            w = ng.NHOM_LY_DO.value_counts().to_frame('So_nguoi'); w['%'] = [pct(a, nT) for a in w.So_nguoi]; R['reason_manual'] = False
+        R['nghi_reason'] = w
+        sx = ng.groupby('NGUON').size().sort_values(ascending=False).to_frame('NGHI'); sx['%'] = [pct(a, nT) for a in sx.NGHI]; R['nghi_src'] = sx
+        R['nghi_tv'] = int((ng.days < 30).sum()); R['nghi_early10'] = int((ng.days <= 10).sum()); R['nghi_moi'] = int(ng.NHAN_VIEC_CUNG_THANG.sum())
+    else:
+        for k in ('tenure', 'nghi_unit', 'nghi_pos', 'nghi_reason', 'nghi_src'): R[k] = pd.DataFrame()
+        R['nghi_tv'] = R['nghi_early10'] = R['nghi_moi'] = 0; R['reason_manual'] = False
+    R['dat_thu_viec'], R['dat_thu_viec_list'] = dat_thu_viec(raw, s, e, adj)
+    # ---- độ đầy đủ dữ liệu giữa các file
+    ms = raw['ms']; kn = raw['kn']
+    cov = []
+    for r in nv.itertuples(index=False):
+        cm = ms[(ms.k == r.k) & ((ms.NNV_d - r.NNV).abs() <= pd.Timedelta(days=7))]; ck_ = kn[(kn.k == r.k) & ((kn.NNV_d - r.NNV).abs() <= pd.Timedelta(days=7))]
+        cov.append((len(cm) > 0, len(ck_) > 0 or r.KHOI == 'Văn Phòng'))
+    xx = d[in_cv]; R['dup_cv'] = int(xx.duplicated(['TEN', 'VITRI', 'NGAYLL_d', 'NGUON'], keep='first').sum())
+    R['coverage'] = dict(nv_data=len(nv), nv_in_master=sum(a for a, b in cov), nv_in_kt=sum(b for a, b in cov), master_nv_month=int(_in(ms.NNV_d, s, e).sum()), kt_nv_month=int(_in(kn.NNV_d, s, e).sum()),
+                         nghi_lech_ngay=int(ng.LECH_NGAY.sum()) if nT else 0, nghi_lech_thang=int(ng.LECH_THANG.sum()) if nT else 0, nghi_n=nT, nghi_in_master=int(ng.src.str.contains('Master').sum()) if nT else 0, nghi_in_ck=int(ng.src.str.contains('CHECK LIST').sum()) if nT else 0, nghi_in_kq=int(ng.src.str.contains('KT NGHỈ VIỆC').sum()) if nT else 0)
+    # ---- chi phí
+    cm_ = dict(cost_manual or {}); a = raw['ads']
+    ads = a[_in(a.ngay, s, e)].groupby('ngay').agg(spend=('spend', 'sum'), msg=('msg', 'sum')).reset_index() if a is not None else pd.DataFrame(columns=['ngay', 'spend', 'msg'])
+    extra_days = []
+    for dd, (sp, ms_) in (adj.get('ads_bo_sung') or {}).items():
+        dd = pd.Timestamp(dd)
+        if _in(pd.Series([dd]), s, e).iloc[0] and dd not in set(ads.ngay): ads = pd.concat([ads, pd.DataFrame([dict(ngay=dd, spend=float(sp), msg=float(ms_))])], ignore_index=True); extra_days.append(dd)
+    ads = ads.sort_values('ngay'); fb = float(ads.spend.sum()) if len(ads) else 0.0; msg = float(ads.msg.sum()) if len(ads) else 0.0
+    other = float(sum(cm_.values())); tc = fb + other
+    R['cost'] = dict(fb=fb, msg=msg, ads_days=int(ads.ngay.nunique()), ads_extra_days=len(extra_days), days_in_month=int((e - s).days + 1), manual=cm_, total=tc, cpm=(fb / msg if msg else np.nan),
+                     per_cv=(tc / T['CV'] if T['CV'] and tc else np.nan), per_pv=(tc / T['PV'] if T['PV'] and tc else np.nan), per_pass=(tc / T['PASS'] if T['PASS'] and tc else np.nan), per_nv=(tc / T['NV'] if T['NV'] and tc else np.nan))
+    R['ads_daily'] = ads
+    bl = adj.get('baseline_raw'); R['adj_baseline_diff'] = {}
+    if bl:
+        for k_, v_ in bl['funnel'].items():
+            if R['funnel_raw'][k_] != v_: R['adj_baseline_diff'][k_] = (R['funnel_raw'][k_], v_)
+        if R['nghi_total_raw'] != bl['nghi_raw']: R['adj_baseline_diff']['NGHI'] = (R['nghi_total_raw'], bl['nghi_raw'])
+    return R
+
+def kpi_row(R):
+    T = R['funnel']; c = R['cost']
+    return {'Số CV (liên lạc)': T['CV'], 'Tham gia PV': T['PV'], 'Đạt PV (Pass)': T['PASS'], 'Không đạt PV': T['KHONG_DAT'], 'Không đến PV': T['KHONG_DEN_PV'], 'Nhận việc': T['NV'], 'Không nhận việc': T['KHONG_NV'],
+            '% PV / CV': pct(T['PV'], T['CV']), '% Pass / PV': pct(T['PASS'], T['PV']), '% Nhận việc / Pass': pct(T['NV'], T['PASS']), '% Nhận việc / CV': pct(T['NV'], T['CV']),
+            'Nghỉ việc': R['nghi_total'], '  – nghỉ thử việc (<30 ngày)': R['nghi_tv'], '% nghỉ thử việc / nghỉ việc': pct(R['nghi_tv'], R['nghi_total']), '% nghỉ việc / nhận việc': pct(R['nghi_total'], T['NV']),
+            'Tổng chi phí (VND)': c['total'], 'Chi phí / CV': c['per_cv'], 'Chi phí / người nhận việc': c['per_nv']}
+def compare(results):
+    cols = {f"T{R['month']:02d}/{R['year']}": kpi_row(R) for R in results}
+    df = pd.DataFrame(cols)
+    names = list(df.columns)
+    for i in range(1, len(names)):
+        a, b = df[names[i - 1]], df[names[i]]
+        df[f'Δ% {names[i-1]}→{names[i]}'] = [((y - x) / abs(x) * 100) if (pd.notna(x) and pd.notna(y) and x not in (0,)) and not str(idx).startswith('%') else np.nan for idx, x, y in zip(df.index, a, b)]
     return df
 
 
-def parse_sl_sheet(all_sheets):
-    key = next((k for k in all_sheets if 'SL' in k.upper() or 'TỔNG' in k.upper()), None)
-    if not key: return pd.DataFrame()
-    df = all_sheets[key]
-    sl = df.iloc[4:].copy()
-    sl.columns = range(len(sl.columns))
-    rename = {0:'STT',1:'Thuong_hieu',2:'Ma_sp',4:'Ten_hang',
-              5:'Tiktok',6:'Shopee',7:'Lazada',8:'Tong_SL',9:'Gia_von'}
-    sl = sl.rename(columns={k: v for k, v in rename.items() if k < len(sl.columns)})
-    if 'Ten_hang' not in sl.columns: return pd.DataFrame()
-    sl['Tong_SL'] = pd.to_numeric(sl.get('Tong_SL', 0), errors='coerce').fillna(0)
-    sl['Gia_von'] = pd.to_numeric(sl.get('Gia_von', 0), errors='coerce').fillna(0)
-    for c in ['Tiktok','Shopee','Lazada']:
-        if c in sl.columns:
-            sl[c] = pd.to_numeric(sl[c], errors='coerce').fillna(0)
-    sl = sl[sl['Ten_hang'].notna() & (sl['Ten_hang'].astype(str).str.strip() != '') &
-            (sl['Ten_hang'].astype(str) != 'nan')]
-    sl = sl[sl['Tong_SL'] > 0]
-    sl = sl[~sl['STT'].astype(str).str.upper().str.contains('TỔNG|TOTAL', na=False)]
-    sl['La_hang_tang'] = sl['Ten_hang'].astype(str).str.contains('Hàng tặng|hàng tặng', na=False)
-    return sl
+XL_NOTES = [
+    'CV = ngày liên lạc trong tháng. Tham gia PV = ngày PV trong tháng & KQ ∈ {Đạt, Đợi kết quả, Không đạt}. Pass = ngày PV trong tháng & Đạt. Nhận việc = ngày nhận việc trong tháng & "Đã nhận việc".',
+    'Nghỉ việc = hợp CHECK LIST + sheet NGHỈ VIỆC (Kế toán) + Master theo ngày nghỉ (ưu tiên Master → CHECK LIST → NGHỈ VIỆC khi ngày khác nhau). Nghỉ thử việc = làm dưới 30 ngày.',
+    'Tỷ lệ "theo kỳ" tính mỗi bước theo ngày của bước đó nên có thể vượt 100%; tỷ lệ "theo đợt CV" chỉ xét người liên lạc trong tháng nên luôn ≤100%.',
+    'Phân tích chuyên sâu (mục 12) tính từ dòng raw của tháng, không gồm điều chỉnh khớp báo cáo.',
+    'Nhóm lý do nghỉ: tháng có điều chỉnh dùng 12 nhóm phân loại tay của báo cáo; tháng khác gán tự động theo từ khóa, chỉ tham khảo.',
+    'Người chưa có trong file nghỉ việc được coi là còn làm khi tính giữ chân; chỉ tính người đã đủ số ngày tới ngày dữ liệu mới nhất.']
+
+def _pct_col(name): n = str(name); return n.startswith('%') or n.startswith('Δ%') or n.startswith('% ')
+def _num_kind(v): return 'int' if (isinstance(v, (int, np.integer)) or (isinstance(v, (float, np.floating)) and float(v).is_integer())) else 'flt'
+def _write_df(ws, df, row, F, index=True, widths=None):
+    """Ghi DataFrame vào sheet bắt đầu từ dòng `row` (0-based), trả về dòng tiếp theo."""
+    if isinstance(df, pd.Series): df = df.to_frame()
+    if index and not isinstance(df.index, pd.RangeIndex):
+        df = df.copy(); df.index.name = df.index.name or 'Chỉ tiêu'; df = df.reset_index()
+    cols = list(df.columns)
+    for j, c in enumerate(cols): ws.write(row, j, str(c), F['hdr'])
+    for i, rec in enumerate(df.itertuples(index=False), start=row + 1):
+        for j, v in enumerate(rec):
+            c = cols[j]
+            if v is None or (isinstance(v, float) and np.isnan(v)) or v is pd.NaT: ws.write_blank(i, j, None, F['txt']); continue
+            if isinstance(v, (pd.Timestamp, datetime.datetime, datetime.date)): ws.write_datetime(i, j, v.to_pydatetime() if isinstance(v, pd.Timestamp) else v, F['date']); continue
+            if isinstance(v, (bool, np.bool_)): ws.write_string(i, j, 'Có' if v else 'Không', F['txt']); continue
+            if isinstance(v, (int, float, np.integer, np.floating)):
+                ws.write_number(i, j, float(v), F['pct'] if _pct_col(c) else F[_num_kind(v)]); continue
+            ws.write_string(i, j, str(v), F['txt'])
+        if widths is not None:
+            for j, v in enumerate(rec): widths[j] = max(widths.get(j, 0), min(len(str(v)) if v is not None else 0, 45))
+    return row + len(df) + 2
+
+def month_sections(R, Dp, bt):
+    """Danh sách (tiêu đề, bảng) của một tháng – dùng chung cho Excel và kiểm thử."""
+    T = R['funnel']; c = R['cost']; S = []
+    S.append(('1. Chỉ tiêu chính', pd.DataFrame({'Giá trị': pd.Series(kpi_row(R))})))
+    fun = pd.DataFrame({'Bước': ['CV (liên lạc)', 'Tham gia PV', 'Đạt PV', 'Nhận việc'], 'Số lượng': [T['CV'], T['PV'], T['PASS'], T['NV']]})
+    fun['% so với bước trước'] = [np.nan] + [pct(fun['Số lượng'][i], fun['Số lượng'][i - 1]) for i in range(1, 4)]; fun['% so với CV'] = [pct(x, T['CV']) for x in fun['Số lượng']]
+    S.append(('2. Phễu tuyển dụng', fun.set_index('Bước')))
+    S.append(('2b. Kết quả phỏng vấn / nhận việc', pd.DataFrame({'Số lượng': [T['KHONG_DAT'], T['KHONG_DEN_PV'], T['DOI_KQ'], T['KHONG_NV']],
+                '%': [pct(T['KHONG_DAT'], T['PV']), pct(T['KHONG_DEN_PV'], T['PV'] + T['KHONG_DEN_PV']), pct(T['DOI_KQ'], T['PV']), pct(T['KHONG_NV'], T['NV'] + T['KHONG_NV'])]},
+                index=pd.Index(['Không đạt PV (% của tham gia PV)', 'Không đến PV (% của số hẹn)', 'Đợi kết quả (% của tham gia PV)', 'Không nhận việc (% của số được mời)'], name='Chỉ tiêu'))))
+    kyc = ['CV', 'PV', 'PASS', 'NV', 'KHONG_NV', '%PV/CV', '%Pass/PV', '%NV/Pass', '%NV/CV', '%Không đến PV', '%Tỷ trọng CV', '%Tỷ trọng NV']; dotc = ['CV_DOT', 'DOT_PV', 'DOT_PASS', 'DOT_NV', '%Đợt CV→PV', '%Đợt CV→Pass', '%Đợt CV→NV']
+    for nm, key in (('3. Theo nguồn CV', 'by_source'), ('4. Theo nhân sự tuyển dụng (HR)', 'by_hr'), ('5. Theo chi nhánh / phòng ban (mọi vị trí)', 'by_unit')):
+        S.append((nm + ' – theo kỳ', R[key][kyc])); S.append((nm + ' – theo đợt CV', R[key][dotc]))
+    S.append(('5b. Theo khối', R['by_khoi'][['CV', 'PV', 'PASS', 'NV', '%PV/CV', '%Pass/PV', '%NV/Pass', '%NV/CV']]))
+    S.append(('5c. Theo vị trí (top 15 theo CV)', R['by_pos'].sort_values('CV', ascending=False).head(15)[['CV', 'PV', 'PASS', 'NV', '%PV/CV', '%Pass/PV', '%NV/Pass', '%NV/CV']]))
+    S.append(('6. Biến động nhân sự theo chi nhánh', bt))
+    dr = R['dept_report']
+    if len(dr):
+        dd = dr.copy(); dd.loc['% Tham gia PV / CV'] = [pct(a, b) for a, b in zip(dr.loc['Tham gia PV'], dr.loc['Số CV'])]; dd.loc['% Đạt PV / Tham gia PV'] = [pct(a, b) for a, b in zip(dr.loc['Đạt PV'], dr.loc['Tham gia PV'])]; dd.loc['% Đã NV / Đạt PV'] = [pct(a, b) for a, b in zip(dr.loc['Đã NV'], dr.loc['Đạt PV'])]
+        S.append(('7. Phòng ban / chi nhánh – đúng định nghĩa báo cáo', dd))
+    S.append(('8. Người hết thử việc trong tháng (còn làm việc)', R['dat_thu_viec'].rename('Số người').to_frame()))
+    rt = R['retention']
+    S.append(('9. Giữ chân người nhận việc', pd.DataFrame({'Số lượng': [rt['n'], rt['nghi_all'], rt['nghi30'], rt['nghi60']], '%': [np.nan, pct(rt['nghi_all'], rt['n']), pct(rt['nghi30'], rt['n']), pct(rt['nghi60'], rt['n'])]}, index=pd.Index(['Nhận việc trong tháng', 'Đã nghỉ (tính đến nay)', 'Nghỉ trong 30 ngày', 'Nghỉ trong 60 ngày'], name='Chỉ tiêu'))))
+    if len(R['retention_src']): S.append(('9b. Giữ chân theo nguồn', R['retention_src'].set_index('NGUON')[['NV', 'NGHI', 'NGHI30', '%Đã nghỉ', '%Nghỉ ≤30 ngày']]))
+    n = R['nghi_total']
+    S.append(('10. Nghỉ việc – tổng quan', pd.DataFrame({'Số lượng': [n, R['nghi_tv'], R['nghi_early10'], R['nghi_moi']], '%': [pct(n, T['NV']), pct(R['nghi_tv'], n), pct(R['nghi_early10'], n), pct(R['nghi_moi'], n)]},
+                index=pd.Index(['Nghỉ việc (% so với nhận việc)', 'Nghỉ thử việc <30 ngày (% của nghỉ)', 'Nghỉ ≤10 ngày (% của nghỉ)', 'Vào và nghỉ trong cùng tháng (% của nghỉ)'], name='Chỉ tiêu'))))
+    for nm, key in (('10b. Thời gian làm việc trước khi nghỉ', 'tenure'), ('10c. Nghỉ việc theo chi nhánh / bộ phận', 'nghi_unit'), ('10d. Nghỉ việc theo chức vụ (top 15)', 'nghi_pos'), ('10e. Nhóm lý do nghỉ', 'nghi_reason'), ('10f. Nghỉ việc theo nguồn', 'nghi_src')):
+        if len(R[key]): S.append((nm, R[key].head(15) if key == 'nghi_pos' else R[key]))
+    if len(R['nghi_excluded']): S.append(('10g. Người nghỉ trong nguồn nhưng báo cáo không liệt kê (cần xác minh)', R['nghi_excluded'][['TEN', 'CN', 'NNV', 'NNGHI', 'LY_DO_LOAI']].rename(columns={'TEN': 'Họ tên', 'CN': 'Chi nhánh', 'NNV': 'Ngày nhận việc', 'NNGHI': 'Ngày nghỉ', 'LY_DO_LOAI': 'Lý do không tính'}).reset_index(drop=True)))
+    cost = {'Facebook Ads (VND)': c['fb'], 'Chi phí nhập tay (VND)': float(sum(c['manual'].values())), 'Tổng chi phí (VND)': c['total'], 'Chi phí / CV': c['per_cv'], 'Chi phí / lượt tham gia PV': c['per_pv'], 'Chi phí / Pass': c['per_pass'], 'Chi phí / người nhận việc': c['per_nv'],
+            'Lượt nhắn tin Facebook': c['msg'], 'Chi phí / lượt nhắn tin': c['cpm'], 'Số ngày có số liệu Ads': c['ads_days'], 'Số ngày trong tháng': c['days_in_month']}
+    for k_, v_ in c['manual'].items(): cost[f'  – {k_} (VND)'] = v_
+    S.append(('11. Chi phí tuyển dụng', pd.DataFrame({'Giá trị': pd.Series(cost)})))
+    if len(R['ads_daily']): S.append(('11b. Facebook Ads theo ngày', R['ads_daily'].rename(columns={'ngay': 'Ngày', 'spend': 'Chi tiêu (VND)', 'msg': 'Lượt nhắn tin'}).reset_index(drop=True)))
+    cv_ = R['coverage']
+    S.append(('12. Độ đầy đủ dữ liệu giữa các file', pd.DataFrame({'Số lượng': [cv_['nv_data'], cv_['nv_in_master'], cv_['nv_in_kt'], cv_['master_nv_month'], cv_['kt_nv_month'], cv_['nghi_n'], cv_['nghi_in_master'], cv_['nghi_in_ck'], cv_['nghi_in_kq'], cv_['nghi_lech_ngay'], cv_['nghi_lech_thang']]},
+                index=pd.Index(['Người nhận việc (DATA)', '  – có trong Master', '  – có trong Kế toán (chi nhánh)', 'Dòng nhận việc tháng trong Master', 'Dòng nhận việc tháng trong Kế toán', 'Người nghỉ việc (hợp 3 nguồn)', '  – có trong Master', '  – có trong CHECK LIST', '  – có trong sheet NGHỈ VIỆC', 'Người nghỉ có ngày lệch giữa các file', '  – lệch sang tháng khác'], name='Chỉ tiêu'))))
+    if Dp:
+        S.append(('13. Sàng lọc CV theo kết quả đánh giá', Dp['screen'])); S.append(('13b. Sàng lọc CV theo nguồn', Dp['screen_src'])); S.append(('13c. Sàng lọc CV theo HR', Dp['screen_hr']))
+        lt = Dp['lead']
+        if lt['n']:
+            S.append(('14. Thời gian tuyển (ngày)', lt['stats'])); S.append(('14b. Phân bố liên lạc → nhận việc', lt['dist'])); S.append(('14c. Thời gian tuyển theo nguồn', lt['by_source'])); S.append(('14d. Thời gian tuyển theo vị trí', lt['by_pos']))
+        S.append(('15. Người phỏng vấn', Dp['interv']))
+        for nm, key in (('16. Nguồn × chi nhánh – % nhận việc / CV', 'x_src_unit'), ('17. Nguồn × vị trí – % nhận việc / CV', 'x_src_pos')):
+            if Dp[key] is not None: S.append((nm, Dp[key]['rate'])); S.append((nm.split(' – ')[0] + ' – số CV', Dp[key]['cv'])); S.append((nm.split(' – ')[0] + ' – số nhận việc', Dp[key]['nv']))
+        sal = Dp['salary']
+        if sal.get('n'): S.append((f"18. Lương đề nghị (có ghi lương: {sal['n']}/{sal['cv']} CV)", sal['table']))
+        S.append(('19. Giữ chân – đường cong', Dp['ret']['curve']))
+        for nm, key in (('19b. Nghỉ trong 30 ngày theo nguồn', 'by_source'), ('19c. theo chi nhánh / bộ phận', 'by_unit'), ('19d. theo vị trí', 'by_pos'), ('19e. theo HR', 'by_hr')): S.append((nm, Dp['ret'][key]))
+    return [(t, d) for t, d in S if d is not None and len(d)]
+
+def adj_lines(R):
+    ad = R['adj']; L = []
+    if not ad: return L
+    L.append(f"Khối điều chỉnh: {ad.get('ten', '')}")
+    for x in ad.get('nhan_viec_bo_sung', []): L.append(f"Thêm người nhận việc: {x['TEN']} ({x['CN']}, {x['NNV']}) – {x['ly_do']}")
+    for k_, dt_, why in ad.get('loai_tru_nghi', []): L.append(f"Không tính vào nghỉ việc: {k_.title()} (nhận việc {dt_}) – {why}")
+    ly = ad.get('ly_do_delta', {})
+    for nm, key in (('Theo nguồn', 'delta_nguon'), ('Theo HR', 'delta_hr'), ('Theo chi nhánh (mọi vị trí)', 'delta_unit'), ('Bảng phòng ban/chi nhánh', 'delta_dept')):
+        if ad.get(key): L.append(f"{nm}: " + '; '.join(f'{g_} – {mm}: {v:+d}' for (g_, mm), v in ad[key].items()) + f" | {ly.get(key.split('_')[1], '')}")
+    L.append('Nhập tay theo báo cáo: đầu kỳ, số lượng yêu cầu, chi phí CareerViet/TopCV, Facebook Ads 30–31/10, nhóm lý do nghỉ.')
+    for k_, (a_, b_) in R.get('adj_baseline_diff', {}).items(): L.append(f'CẢNH BÁO: raw hiện tại khác raw lúc lập điều chỉnh ở {k_}: {a_} (hiện tại) so với {b_} (khi lập).')
+    return L
+
+def export_excel(results, deeps=None, bts=None, trend=None, meta=None):
+    """Xuất toàn bộ báo cáo các tháng đã chọn ra Excel (bytes): mỗi tháng một sheet báo cáo + 3 sheet danh sách; thêm So sánh, Xu hướng, Điều chỉnh, Ghi chú."""
+    deeps = deeps or {}; bts = bts or {}; meta = meta or {}; buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='xlsxwriter', datetime_format='dd/mm/yyyy') as w:
+        wb = w.book
+        F = dict(title=wb.add_format({'bold': True, 'font_size': 14, 'font_color': '#1F3864'}), sec=wb.add_format({'bold': True, 'font_color': '#FFFFFF', 'bg_color': '#2F5597'}),
+                 hdr=wb.add_format({'bold': True, 'bg_color': '#D9E1F2', 'border': 1, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center'}), txt=wb.add_format({'border': 1}),
+                 int=wb.add_format({'border': 1, 'num_format': '#,##0'}), flt=wb.add_format({'border': 1, 'num_format': '#,##0.0'}), pct=wb.add_format({'border': 1, 'num_format': '0.0"%"'}),
+                 date=wb.add_format({'border': 1, 'num_format': 'dd/mm/yyyy'}), note=wb.add_format({'italic': True, 'font_color': '#595959', 'text_wrap': True, 'valign': 'top'}), wrap=wb.add_format({'text_wrap': True, 'valign': 'top'}))
+        def sheet(name):
+            ws = wb.add_worksheet(name[:31]); w.sheets[name[:31]] = ws; return ws
+        # --- Tổng quan
+        ws = sheet('Tổng quan'); ws.set_column(0, 0, 36); ws.set_column(1, 1, 90); ws.write(0, 0, 'BÁO CÁO TUYỂN DỤNG THEO THÁNG', F['title'])
+        info = [('Ngày tạo file', pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')), ('Năm', str(results[0]['year']) if results else ''), ('Các tháng', ', '.join(f"T{R['month']:02d}" for R in results)),
+                ('Ngày dữ liệu mới nhất', f"{results[0]['cutoff']:%d/%m/%Y}" if results else ''), ('Khớp báo cáo đã duyệt', 'Có (tháng có khối điều chỉnh)' if any(R['adjusted'] for R in results) else 'Không (số thuần từ raw)')]
+        for k_, v_ in meta.get('files', {}).items(): info.append((f'File nguồn – {k_}', str(v_)))
+        for R in results:
+            if R['adjusted']: info.append((f"T{R['month']:02d} đã áp dụng điều chỉnh", R['adj'].get('ten', '')))
+        for i, (k_, v_) in enumerate(info, start=2): ws.write(i, 0, k_, F['hdr']); ws.write(i, 1, v_, F['txt'])
+        r0 = len(info) + 3; ws.write(r0, 0, 'Nội dung các sheet', F['sec']); ws.write(r0, 1, '', F['sec'])
+        for i, (a_, b_) in enumerate([('So sánh tháng', 'Chỉ tiêu chính của các tháng và % thay đổi'), ('Xu hướng năm', '12 tháng của năm (tính từ raw)'), ('Txx Báo cáo', 'Toàn bộ bảng của tháng xx, đánh số mục 1–19'), ('Txx DS nhận việc / DS nghỉ việc / DS đạt TV', 'Danh sách từng người'), ('Điều chỉnh', 'Các điều chỉnh để khớp báo cáo và lý do'), ('Ghi chú', 'Định nghĩa và lưu ý')], start=r0 + 1): ws.write(i, 0, a_, F['txt']); ws.write(i, 1, b_, F['txt'])
+        # --- So sánh
+        ws = sheet('So sánh tháng'); ws.set_column(0, 0, 38); ws.set_column(1, 12, 16); ws.write(0, 0, 'SO SÁNH CÁC THÁNG', F['title']); _write_df(ws, compare(results), 2, F); ws.freeze_panes(3, 1)
+        # --- Xu hướng
+        if trend is not None:
+            ws = sheet('Xu hướng năm'); ws.set_column(0, 0, 30); ws.set_column(1, 20, 14); ws.write(0, 0, f"XU HƯỚNG 12 THÁNG NĂM {results[0]['year']} (từ raw, không gồm điều chỉnh khớp báo cáo)", F['title']); r = 2
+            for ttl, df in (('Số lượng và tỷ lệ theo tháng', trend['table']), ('Thay đổi so với tháng trước (%)', trend['mom']), ('Nhận việc theo nguồn (6 nguồn nhiều nhất)', trend['src_nv']), ('CV theo nguồn (8 nguồn nhiều nhất)', trend['src_cv'])):
+                ws.merge_range(r, 0, r, 8, ttl, F['sec']); r = _write_df(ws, df, r + 1, F)
+        # --- Từng tháng
+        for R in results:
+            m = R['month']; p = f'T{m:02d}'; Dp = deeps.get(m); bt = bts.get(m)
+            if bt is None: bt = branch_table(R, (R['adj'] or {}).get('dau_ky'), (R['adj'] or {}).get('sl_yc'))
+            ws = sheet(f'{p} Báo cáo'); ws.set_column(0, 0, 42); ws.set_column(1, 14, 15); widths = {}
+            ws.write(0, 0, f"BÁO CÁO TUYỂN DỤNG THÁNG {m:02d}/{R['year']} ({R['start']:%d/%m} – {R['end']:%d/%m})", F['title'])
+            ws.write(1, 0, 'Khớp báo cáo đã duyệt: ' + ('có (xem sheet Điều chỉnh)' if R['adjusted'] else 'không – số thuần từ raw'), F['note']); r = 3
+            if not R['has_data']: ws.write(r, 0, 'Không có CV hoặc nhận việc nào trong tháng này (file chưa cập nhật tới tháng này?).', F['note']); r += 2
+            for ttl, df in month_sections(R, Dp, bt):
+                ws.merge_range(r, 0, r, 8, ttl, F['sec']); r = _write_df(ws, df, r + 1, F)
+            ws.freeze_panes(3, 1)
+            # danh sách
+            nv = R['nv_list']; ws = sheet(f'{p} DS nhận việc'); wd = {}
+            ws.write(0, 0, f'DANH SÁCH NGƯỜI NHẬN VIỆC THÁNG {m:02d}/{R["year"]}', F['title'])
+            cols = {'TEN': 'Họ tên', 'KHOI': 'Khối', 'CN': 'Chi nhánh / bộ phận', 'VITRI': 'Vị trí', 'NGUON': 'Nguồn', 'LH': 'Người liên hệ', 'NNV': 'Ngày nhận việc', 'NGAY_DEN_KHI_NGHI': 'Số ngày đến khi nghỉ', 'DA_NGHI': 'Đã nghỉ', 'GHI_CHU': 'Ghi chú'}
+            _write_df(ws, nv[list(cols)].rename(columns=cols).reset_index(drop=True) if len(nv) else pd.DataFrame(columns=list(cols.values())), 2, F, widths=wd)
+            for j, wv in wd.items(): ws.set_column(j, j, max(12, wv + 2))
+            ws.freeze_panes(3, 1); ng = R['nghi_list']; ws = sheet(f'{p} DS nghỉ việc'); wd = {}
+            ws.write(0, 0, f'DANH SÁCH NGƯỜI NGHỈ VIỆC THÁNG {m:02d}/{R["year"]}', F['title'])
+            cols = {'TEN': 'Họ tên', 'CN': 'Chi nhánh', 'TT': 'Tình trạng', 'MSNV': 'MSNV', 'BP': 'Bộ phận', 'CV': 'Chức vụ', 'NNV': 'Ngày nhận việc', 'NNGHI': 'Ngày nghỉ', 'days': 'Số ngày làm việc', 'NHOM': 'Nhóm thâm niên', 'LOAI': 'Loại', 'NGUON': 'Nguồn', 'LH': 'Người liên hệ', 'NHOM_LY_DO': 'Nhóm lý do (tự động)', 'LYDO': 'Lý do', 'src': 'Có trong file', 'LECH_NGAY': 'Ngày nghỉ lệch giữa các file'}
+            _write_df(ws, ng[list(cols)].rename(columns=cols).reset_index(drop=True) if len(ng) else pd.DataFrame(columns=list(cols.values())), 2, F, widths=wd)
+            for j, wv in wd.items(): ws.set_column(j, j, max(12, wv + 2))
+            ws.freeze_panes(3, 1); dl = R['dat_thu_viec_list']; ws = sheet(f'{p} DS đạt TV'); wd = {}
+            ws.write(0, 0, f'DANH SÁCH NGƯỜI HẾT THỬ VIỆC THÁNG {m:02d}/{R["year"]}', F['title'])
+            cols = {'CN_BC': 'Chi nhánh', 'TT': 'Tình trạng', 'MSNV': 'MSNV', 'TEN': 'Họ tên', 'BP': 'Bộ phận', 'CV': 'Chức vụ', 'NNV_d': 'Ngày nhận việc', 'NCTV_d': 'Ngày cuối thử việc'}
+            _write_df(ws, dl[list(cols)].rename(columns=cols).reset_index(drop=True) if len(dl) else pd.DataFrame(columns=list(cols.values())), 2, F, widths=wd)
+            for j, wv in wd.items(): ws.set_column(j, j, max(12, wv + 2))
+            ws.freeze_panes(3, 1)
+        # --- Điều chỉnh + Ghi chú
+        ws = sheet('Điều chỉnh'); ws.set_column(0, 0, 14); ws.set_column(1, 1, 150); ws.write(0, 0, 'CÁC ĐIỀU CHỈNH ĐỂ KHỚP BÁO CÁO ĐÃ DUYỆT', F['title']); r = 2
+        any_adj = False
+        for R in results:
+            if R['adjusted']:
+                any_adj = True
+                for line in adj_lines(R): ws.write(r, 0, f"T{R['month']:02d}", F['txt']); ws.write(r, 1, line, F['wrap']); r += 1
+        if not any_adj: ws.write(r, 0, 'Không có điều chỉnh nào được áp dụng – toàn bộ là số thuần từ raw.', F['note'])
+        ws = sheet('Ghi chú'); ws.set_column(0, 0, 160); ws.write(0, 0, 'ĐỊNH NGHĨA VÀ LƯU Ý', F['title'])
+        for i, t_ in enumerate(XL_NOTES, start=2): ws.write(i, 0, t_, F['wrap'])
+    return buf.getvalue()
 
 
-def parse_hoan_hang(all_sheets):
-    key = next((k for k in all_sheets if 'HOÀN' in k.upper() or 'HOAN' in k.upper()), None)
-    if not key: return pd.DataFrame()
-    df = all_sheets[key]
-    header_row = None
-    for i, row in df.iterrows():
-        vals = str(row.values)
-        if 'STT' in vals and 'Tên hàng hoá' in vals:
-            header_row = i
-            break
-    if header_row is None: return pd.DataFrame()
-    data = df.iloc[header_row + 1:].copy()
-    data.columns = range(len(data.columns))
-    col_map = {0:'San',1:'STT',2:'Khach_hang',3:'Ma_don',4:'Ma_sp',
-               5:'Ten_hang',6:'So_luong',7:'Gia_von',8:'Tong_gia_von'}
-    cols = {k: v for k, v in col_map.items() if k < len(data.columns)}
-    df2 = data[list(cols.keys())].copy()
-    df2.columns = list(cols.values())
-    df2 = df2[df2['Ten_hang'].notna() & (df2['Ten_hang'].astype(str).str.strip() != '')]
-    df2['Tong_gia_von'] = pd.to_numeric(df2['Tong_gia_von'], errors='coerce').fillna(0)
-    df2['So_luong']     = pd.to_numeric(df2['So_luong'],     errors='coerce').fillna(0)
-    df2['San'] = df2['San'].replace('', np.nan).ffill()
-    df2 = df2[df2['Tong_gia_von'] > 0]
-    return df2
 
 
-@st.cache_data
-def load_and_parse(file_bytes, filename):
-    buf = io.BytesIO(file_bytes)
-    all_sheets = pd.read_excel(buf, sheet_name=None, header=None)
-    san_map = {}
-    for s in all_sheets:
-        su = s.upper()
-        if 'TIKTOK' in su:   san_map['TiktokShop'] = s
-        elif 'SHOPEE' in su: san_map['Shopee'] = s
-        elif 'LAZADA' in su: san_map['Lazada'] = s
-    month_key, month_label = extract_month_from_filename(filename)
-    frames = []
-    for label, sheet_name in san_map.items():
-        df = parse_sales_sheet(all_sheets[sheet_name], label)
-        if len(df) > 0:
-            df['Ky_bao_cao']  = filename
-            df['Thang_key']   = month_key
-            df['Thang_label'] = month_label
-            frames.append(df)
-    all_data  = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    sl_data   = parse_sl_sheet(all_sheets)
-    hoan_data = parse_hoan_hang(all_sheets)
-    for d in [sl_data, hoan_data]:
-        if len(d) > 0:
-            d['Ky_bao_cao']  = filename
-            d['Thang_key']   = month_key
-            d['Thang_label'] = month_label
-    return all_data, sl_data, hoan_data, list(san_map.keys()), list(all_sheets.keys()), month_key, month_label
+# ------------------------------------------------------------------ PHÂN TÍCH CHUYÊN SÂU (tính từ dòng raw, không gồm điều chỉnh khớp báo cáo)
+def _cv(d, s, e): return d[_in(d.NGAYLL_d, s, e)].copy()
+def screening(d, s, e, key=None):
+    """Sàng lọc CV: kết quả đánh giá CV (Phù hợp / Lưu / Không phù hợp) và đi tiếp tới PV, Pass, nhận việc (theo đợt CV tháng này)."""
+    c = _cv(d, s, e)
+    if not len(c): return pd.DataFrame()
+    c['DG'] = c.DANHGIA.fillna('(chưa đánh giá)'); c['_pv'] = c.KQPV.isin(PVOK); c['_ps'] = c.KQPV == 'Đạt'; c['_nv'] = c.KQNV == 'Đã nhận việc'
+    if key is None:
+        g = c.groupby('DG').agg(CV=('TEN', 'size'), PV=('_pv', 'sum'), PASS=('_ps', 'sum'), NV=('_nv', 'sum')).astype(int)
+        g['% tổng CV'] = [pct(a, len(c)) for a in g.CV]; g['% đi tới PV'] = [pct(a, b) for a, b in zip(g.PV, g.CV)]; g['% Pass'] = [pct(a, b) for a, b in zip(g.PASS, g.CV)]; g['% nhận việc'] = [pct(a, b) for a, b in zip(g.NV, g.CV)]
+        return g.sort_values('CV', ascending=False)
+    c['_ph'] = c.DG == 'Phù hợp'; c['_lu'] = c.DG == 'Lưu'; c['_kp'] = c.DG == 'Không phù hợp'; c['_dg'] = c.DG != '(chưa đánh giá)'
+    c['_ph_pv'] = c._ph & c._pv; c['_ph_nv'] = c._ph & c._nv
+    g = c.groupby(key).agg(CV=('TEN', 'size'), DA_DANH_GIA=('_dg', 'sum'), PHU_HOP=('_ph', 'sum'), LUU=('_lu', 'sum'), KHONG_PHU_HOP=('_kp', 'sum'), PH_DEN_PV=('_ph_pv', 'sum'), PH_NV=('_ph_nv', 'sum')).astype(int)
+    g['% Phù hợp'] = [pct(a, b) for a, b in zip(g.PHU_HOP, g.DA_DANH_GIA)]; g['% Lưu'] = [pct(a, b) for a, b in zip(g.LUU, g.DA_DANH_GIA)]; g['% Không phù hợp'] = [pct(a, b) for a, b in zip(g.KHONG_PHU_HOP, g.DA_DANH_GIA)]
+    g['% Phù hợp đi tới PV'] = [pct(a, b) for a, b in zip(g.PH_DEN_PV, g.PHU_HOP)]; g['% Phù hợp nhận việc'] = [pct(a, b) for a, b in zip(g.PH_NV, g.PHU_HOP)]
+    return g.sort_values('CV', ascending=False)
+
+LEAD_BINS = [(0, 1, '0–1 ngày'), (2, 3, '2–3 ngày'), (4, 7, '4–7 ngày'), (8, 14, '8–14 ngày'), (15, 30, '15–30 ngày'), (31, 10**6, 'Trên 30 ngày')]
+def lead_times(d, s, e):
+    """Thời gian tuyển của người nhận việc trong tháng: liên lạc → PV → nhận việc (ngày)."""
+    nv = d[_in(d.NGAYNV_d, s, e) & (d.KQNV == 'Đã nhận việc')].copy(); out = dict(n=len(nv))
+    nv['ll_pv'] = (nv.NGAYPV_d - nv.NGAYLL_d).dt.days; nv['pv_nv'] = (nv.NGAYNV_d - nv.NGAYPV_d).dt.days; nv['ll_nv'] = (nv.NGAYNV_d - nv.NGAYLL_d).dt.days
+    rows = []
+    for k, nm in (('ll_pv', 'Liên lạc → PV'), ('pv_nv', 'PV → nhận việc'), ('ll_nv', 'Liên lạc → nhận việc')):
+        v = nv[k]; ok = v[v >= 0]
+        rows.append({'Khoảng': nm, 'Số người có đủ ngày': int(v.notna().sum()), 'Hợp lệ (≥0)': int(len(ok)), 'Ngày sai thứ tự': int((v < 0).sum()), 'TB (ngày)': float(ok.mean()) if len(ok) else np.nan, 'Trung vị': float(ok.median()) if len(ok) else np.nan,
+                     'P75': float(ok.quantile(.75)) if len(ok) else np.nan, 'Lớn nhất': float(ok.max()) if len(ok) else np.nan})
+    out['stats'] = pd.DataFrame(rows).set_index('Khoảng'); ok = nv[nv.ll_nv >= 0]
+    dist = [{'Khoảng': lb, 'So_nguoi': int(((ok.ll_nv >= lo) & (ok.ll_nv <= hi)).sum())} for lo, hi, lb in LEAD_BINS]
+    dd = pd.DataFrame(dist).set_index('Khoảng'); dd['%'] = [pct(a, len(ok)) for a in dd.So_nguoi]; dd['% cộng dồn'] = dd['%'].cumsum(); out['dist'] = dd
+    if len(ok):
+        bs = ok.groupby('NGUON').agg(NV=('TEN', 'size'), TB=('ll_nv', 'mean'), Trung_vi=('ll_nv', 'median'), Max=('ll_nv', 'max')).sort_values('NV', ascending=False); bs.columns = ['NV', 'TB (ngày)', 'Trung vị (ngày)', 'Lớn nhất']; out['by_source'] = bs
+        bp = ok.groupby('VITRI').agg(NV=('TEN', 'size'), TB=('ll_nv', 'mean'), Trung_vi=('ll_nv', 'median')).sort_values('NV', ascending=False).head(15); bp.columns = ['NV', 'TB (ngày)', 'Trung vị (ngày)']; out['by_pos'] = bp
+    else: out['by_source'] = pd.DataFrame(); out['by_pos'] = pd.DataFrame()
+    return out
+
+def canon_person(x):
+    """Gộp cách viết tên người phỏng vấn (A Pháp / a Pháp / Pháp -> PHAP)."""
+    if x is None or (isinstance(x, float) and pd.isna(x)): return '(không ghi)'
+    t = norm(x).split()
+    while len(t) > 1 and t[0] in ('A', 'C', 'ANH', 'CHI', 'E', 'CO', 'EM'): t = t[1:]
+    return ' '.join(t) or '(không ghi)'
+def interviewers(d, s, e):
+    x = d[_in(d.NGAYPV_d, s, e) & (d.KQPV.isin(PVOK) | (d.KQPV == 'Không đến pv'))].copy()
+    if not len(x): return pd.DataFrame()
+    x['NGUOI'] = x.NGUOIPV.map(canon_person); x['_den'] = x.KQPV.isin(PVOK); x['_ps'] = x.KQPV == 'Đạt'; x['_kd'] = x.KQPV == 'Không đến pv'; x['_nv'] = (x.KQPV == 'Đạt') & (x.KQNV == 'Đã nhận việc')
+    g = x.groupby('NGUOI').agg(LICH_HEN=('TEN', 'size'), KHONG_DEN=('_kd', 'sum'), THAM_GIA=('_den', 'sum'), PASS=('_ps', 'sum'), NV=('_nv', 'sum')).astype(int)
+    g['% Không đến'] = [pct(a, b) for a, b in zip(g.KHONG_DEN, g.LICH_HEN)]; g['% Pass / tham gia'] = [pct(a, b) for a, b in zip(g.PASS, g.THAM_GIA)]; g['% Nhận việc / Pass'] = [pct(a, b) for a, b in zip(g.NV, g.PASS)]
+    return g.sort_values('THAM_GIA', ascending=False)
+
+def crosstab_conv(d, s, e, rowk, colk, nrow=12, ncol=8):
+    """Ma trận (đợt CV tháng này): số CV, số nhận việc và % nhận việc / CV theo hai chiều."""
+    c = _cv(d, s, e)
+    if not len(c): return None
+    top_r = c[rowk].value_counts().head(nrow).index; top_c = c[colk].value_counts().head(ncol).index
+    c['_r'] = c[rowk].where(c[rowk].isin(top_r), 'Khác'); c['_c'] = c[colk].where(c[colk].isin(top_c), 'Khác'); c['_nv'] = (c.KQNV == 'Đã nhận việc').astype(int)
+    cv = c.pivot_table(index='_r', columns='_c', values='TEN', aggfunc='count', fill_value=0); nv = c.pivot_table(index='_r', columns='_c', values='_nv', aggfunc='sum', fill_value=0)
+    cv['Tổng'] = cv.sum(axis=1); nv['Tổng'] = nv.sum(axis=1); cv.loc['Tổng'] = cv.sum(); nv.loc['Tổng'] = nv.sum()
+    rate = (nv / cv.replace(0, np.nan) * 100)
+    order = [r for r in cv.index if r != 'Tổng'] ; order = sorted(order, key=lambda r: -cv.loc[r, 'Tổng']) + ['Tổng']
+    return dict(cv=cv.loc[order].astype(int), nv=nv.loc[order].astype(int), rate=rate.loc[order])
+
+def parse_luong(x):
+    """'5tr' -> 5.0 ; 'cth 12tr' -> 12 ; '11tr (24h)' -> 11 ; '5,5tr' -> 5.5 ; số >=100000 coi là VND."""
+    if x is None or (isinstance(x, float) and pd.isna(x)): return np.nan
+    t = str(x).lower().replace(',', '.')
+    m = re.search(r'(\d+(?:\.\d+)?)\s*(?:tr|triệu|trieu|m)\b', t) or re.search(r'(\d+(?:\.\d+)?)\s*(?:tr|triệu|trieu)', t)
+    if m: return float(m.group(1))
+    m = re.fullmatch(r'\s*(\d{6,9})\s*', t)
+    return float(m.group(1)) / 1e6 if m else np.nan
+def salary_table(d, s, e):
+    c = _cv(d, s, e)
+    if not len(c): return dict(cover=0, n=0, table=pd.DataFrame())
+    c['LUONG_TR'] = c.LUONG.map(parse_luong); c['_nv'] = c.KQNV == 'Đã nhận việc'; x = c[c.LUONG_TR.notna()]
+    out = dict(cover=pct(len(x), len(c)), n=len(x), cv=len(c))
+    if not len(x): out['table'] = pd.DataFrame(); return out
+    g = x.groupby(x.VITRI.fillna('(không ghi)')).agg(SO_CV_CO_LUONG=('TEN', 'size'), TRUNG_VI=('LUONG_TR', 'median'), TB=('LUONG_TR', 'mean'), THAP_NHAT=('LUONG_TR', 'min'), CAO_NHAT=('LUONG_TR', 'max'), NV=('_nv', 'sum'))
+    g['NV'] = g.NV.astype(int); g['% nhận việc'] = [pct(a, b) for a, b in zip(g.NV, g.SO_CV_CO_LUONG)]; g.columns = ['Số CV có ghi lương', 'Trung vị (triệu)', 'TB (triệu)', 'Thấp nhất', 'Cao nhất', 'Nhận việc', '% nhận việc']
+    out['table'] = g.sort_values('Số CV có ghi lương', ascending=False).head(15); out['overall'] = dict(median=float(x.LUONG_TR.median()), mean=float(x.LUONG_TR.mean()))
+    return out
+
+RET_DAYS = [7, 14, 30, 60, 90]
+def retention_detail(nv, cutoff):
+    """Đường cong giữ chân của người nhận việc trong tháng: % còn làm sau 7/14/30/60/90 ngày (chỉ tính người đã đủ ngày tính tới ngày dữ liệu mới nhất)."""
+    out = {}; rows = []
+    for t in RET_DAYS:
+        mat = nv[nv.NNV + pd.Timedelta(days=t) <= cutoff]; q = int((mat.NGAY_DEN_KHI_NGHI <= t).sum())
+        rows.append({'Mốc': f'Sau {t} ngày', 'Đã đủ ngày': len(mat), 'Đã nghỉ trong mốc': q, '% còn làm': (100 - pct(q, len(mat))) if len(mat) else np.nan, '% đã nghỉ': pct(q, len(mat))})
+    out['curve'] = pd.DataFrame(rows).set_index('Mốc')
+    mat = nv[nv.NNV + pd.Timedelta(days=30) <= cutoff]
+    for key, nm in (('NGUON', 'by_source'), ('CN', 'by_unit'), ('VITRI', 'by_pos'), ('LH', 'by_hr')):
+        if len(mat):
+            g = mat.groupby(mat[key].fillna('(không ghi)')).agg(DA_DU_30_NGAY=('TEN', 'size'), NGHI_30=('NGAY_DEN_KHI_NGHI', lambda x: int((x <= 30).sum()))); g['% nghỉ trong 30 ngày'] = [pct(a, b) for a, b in zip(g.NGHI_30, g.DA_DU_30_NGAY)]
+            out[nm] = g.sort_values('DA_DU_30_NGAY', ascending=False)
+        else: out[nm] = pd.DataFrame()
+    return out
+
+def trend_year(raw, year):
+    """Xu hướng 12 tháng của một năm (từ raw): phễu, nghỉ việc, tỷ lệ chuyển đổi và nguồn."""
+    d = raw['d']; nga = raw['nghi_all']; rows = []; src_cv = {}; src_nv = {}
+    for m in range(1, 13):
+        s, e = month_range(year, m); pvm = _in(d.NGAYPV_d, s, e); nvm = _in(d.NGAYNV_d, s, e); cvm = _in(d.NGAYLL_d, s, e)
+        T = dict(CV=int(cvm.sum()), PV=int((pvm & d.KQPV.isin(PVOK)).sum()), PASS=int((pvm & (d.KQPV == 'Đạt')).sum()), KHONG_DEN_PV=int((pvm & (d.KQPV == 'Không đến pv')).sum()),
+                 NV=int((nvm & (d.KQNV == 'Đã nhận việc')).sum()), KHONG_NV=int((nvm & (d.KQNV == 'Không nhận việc')).sum()))
+        ng = nga[_in(nga.NNGHI, s, e)] if len(nga) else nga
+        T['NGHI'] = len(ng); T['NGHI_TV'] = int((ng.days < 30).sum()) if len(ng) else 0; T['NGHI_SOM'] = int((ng.days <= 10).sum()) if len(ng) else 0; T['THANG'] = m
+        rows.append(T); src_cv[m] = d[cvm].groupby('NGUON').size(); src_nv[m] = d[nvm & (d.KQNV == 'Đã nhận việc')].groupby('NGUON').size()
+    t = pd.DataFrame(rows).set_index('THANG'); t.index = [f'T{m:02d}' for m in t.index]
+    t['% PV/CV'] = [pct(a, b) for a, b in zip(t.PV, t.CV)]; t['% Pass/PV'] = [pct(a, b) for a, b in zip(t.PASS, t.PV)]; t['% NV/Pass'] = [pct(a, b) for a, b in zip(t.NV, t.PASS)]; t['% NV/CV'] = [pct(a, b) for a, b in zip(t.NV, t.CV)]
+    t['% Nghỉ/Nhận việc'] = [pct(a, b) for a, b in zip(t.NGHI, t.NV)]; t['% Nghỉ thử việc/Nghỉ'] = [pct(a, b) for a, b in zip(t.NGHI_TV, t.NGHI)]; t['Tăng ròng (NV − Nghỉ)'] = t.NV - t.NGHI
+    cnt = ['CV', 'PV', 'PASS', 'NV', 'NGHI']
+    mom = t[cnt].pct_change().replace([np.inf, -np.inf], np.nan) * 100; mom.columns = [f'Δ% {c} so với tháng trước' for c in cnt]
+    scv = pd.DataFrame(src_cv).fillna(0).astype(int); snv = pd.DataFrame(src_nv).fillna(0).astype(int)
+    top = snv.sum(axis=1).sort_values(ascending=False).head(6).index
+    scv.columns = [f'T{m:02d}' for m in scv.columns]; snv.columns = [f'T{m:02d}' for m in snv.columns]
+    return dict(table=t, mom=mom, src_cv=scv.loc[scv.sum(axis=1).sort_values(ascending=False).head(8).index], src_nv=snv.loc[top])
+
+def insights(R, deep):
+    """Điểm nổi bật tự động (mỗi câu đều kèm số liệu và cỡ mẫu)."""
+    T = R['funnel']; out = []
+    if T['CV'] == 0: return out
+    steps = [('Tham gia PV / CV', pct(T['PV'], T['CV'])), ('Đạt PV / tham gia PV', pct(T['PASS'], T['PV'])), ('Nhận việc / Đạt PV', pct(T['NV'], T['PASS']))]
+    out.append(f"Phễu: {T['CV']:,} CV → {T['PV']:,} tham gia PV → {T['PASS']:,} đạt → {T['NV']:,} nhận việc ({pct(T['NV'], T['CV']):.1f}% CV thành nhận việc). Bước giữ lại ít nhất: **{min(steps, key=lambda x: (x[1] if x[1] == x[1] else 999))[0]}** ({min(steps, key=lambda x: (x[1] if x[1] == x[1] else 999))[1]:.1f}%).")
+    if T['KHONG_DEN_PV'] and T['PV']: out.append(f"{T['KHONG_DEN_PV']:,} lượt hẹn không đến PV ({pct(T['KHONG_DEN_PV'], T['PV'] + T['KHONG_DEN_PV']):.1f}% số hẹn).")
+    sc = R['by_source']; big = sc[sc.CV >= max(30, 0.05 * T['CV'])]
+    if len(big):
+        b = big.sort_values('%NV/CV', ascending=False).iloc[0]; w = big.sort_values('%NV/CV').iloc[0]
+        out.append(f"Nguồn nhận việc hiệu quả nhất (≥{max(30, int(0.05 * T['CV']))} CV): **{b.name}** – {int(b.NV)} nhận việc / {int(b.CV)} CV ({b['%NV/CV']:.1f}%). Thấp nhất: **{w.name}** – {int(w.NV)}/{int(w.CV)} ({w['%NV/CV']:.1f}%).")
+        z = big[(big.PASS >= 3) & (big.NV == 0)]
+        if len(z): out.append('Nguồn có từ 3 Pass nhưng chưa có nhận việc: ' + ', '.join(f"{i} ({int(r.PASS)} Pass)" for i, r in z.iterrows()) + '.')
+    if R['nghi_total'] and T['NV']:
+        ratio = pct(R['nghi_total'], T['NV'])
+        rtxt = f"tương đương {ratio:.1f}% số nhận việc" if ratio <= 100 else f"nhiều hơn số nhận việc trong tháng ({T['NV']:,}) vì gồm cả người vào làm từ các tháng trước"
+        out.append(f"Nghỉ việc {R['nghi_total']:,} người, {rtxt}; {pct(R['nghi_tv'], R['nghi_total']):.1f}% là nghỉ thử việc (<30 ngày) và {pct(R['nghi_early10'], R['nghi_total']):.1f}% nghỉ trong 10 ngày đầu.")
+    ru = R['nghi_unit']
+    if len(ru):
+        r0 = ru.iloc[0]; out.append(f"Chi nhánh/bộ phận nghỉ nhiều nhất: **{ru.index[0]}** ({int(r0.NGHI)} người, {r0['%Tỷ trọng']:.1f}% tổng nghỉ).")
+    sc_ = deep.get('screen')
+    if sc_ is not None and len(sc_) and 'Phù hợp' in sc_.index:
+        out.append(f"Sàng lọc CV: {sc_.loc['Phù hợp', 'CV']:,} CV 'Phù hợp' ({sc_.loc['Phù hợp', '% tổng CV']:.1f}% tổng CV), trong đó {sc_.loc['Phù hợp', '% đi tới PV']:.1f}% đi tới PV.")
+    lt = deep.get('lead')
+    if lt and lt['stats'].loc['Liên lạc → nhận việc', 'Hợp lệ (≥0)'] > 0: out.append(f"Thời gian từ liên lạc đến nhận việc: trung vị {lt['stats'].loc['Liên lạc → nhận việc', 'Trung vị']:.0f} ngày, trung bình {lt['stats'].loc['Liên lạc → nhận việc', 'TB (ngày)']:.1f} ngày (P75 {lt['stats'].loc['Liên lạc → nhận việc', 'P75']:.0f} ngày).")
+    rt = deep.get('ret')
+    if rt is not None and rt['curve'].loc['Sau 30 ngày', 'Đã đủ ngày'] > 0: out.append(f"Giữ chân: trong {int(rt['curve'].loc['Sau 30 ngày', 'Đã đủ ngày'])} người đã đủ 30 ngày, {rt['curve'].loc['Sau 30 ngày', '% đã nghỉ']:.1f}% đã nghỉ trong 30 ngày đầu.")
+    return out
+
+def analyze_deep(raw, R):
+    d = raw['d']; s, e = R['start'], R['end']
+    return dict(screen=screening(d, s, e), screen_src=screening(d, s, e, 'NGUON'), screen_hr=screening(d, s, e, 'LH'), lead=lead_times(d, s, e), interv=interviewers(d, s, e),
+                x_src_unit=crosstab_conv(d, s, e, 'NGUON', 'DON_VI'), x_src_pos=crosstab_conv(d, s, e, 'NGUON', 'VITRI'), salary=salary_table(d, s, e), ret=retention_detail(R['nv_list'], raw['cutoff']))
+
+# =====================================================================================================
+# 3) GIAO DIỆN STREAMLIT
+# =====================================================================================================
+MONTHS = {i: f'Tháng {i:02d}' for i in range(1, 13)}
+
+@st.cache_resource(show_spinner='Đang đọc 4 file raw (khoảng 15–30 giây)…')
+def load_folder(folder, sig):
+    f = find_files(folder); need = [k for k in ('data', 'kt', 'master') if k not in f]
+    if need: raise FileNotFoundError('Thiếu file trong thư mục: ' + ', '.join(need))
+    return load_raw(f['data'], f['kt'], f['master'], f.get('ads')), {k: os.path.basename(v) for k, v in f.items()}
+@st.cache_data(show_spinner=False)
+def classify_cached(b):
+    return classify_file(b)
+@st.cache_resource(show_spinner='Đang đọc file đã tải lên…')
+def load_bytes(a, b, c, d, sig):
+    return load_raw(a, b, c, d), {}
+
+def colcfg(df):
+    cfg = {}
+    for c in df.columns:
+        if str(c).startswith('%') or str(c).startswith('Δ%'): cfg[c] = st.column_config.NumberColumn(c, format='%.1f%%')
+        elif str(c).startswith(('Chi phí', 'Tổng chi')): cfg[c] = st.column_config.NumberColumn(c, format='%.0f')
+    return cfg
+def show(df, **kw):
+    if df is None or len(df) == 0: st.caption('Không có dữ liệu.'); return
+    st.dataframe(df, column_config=colcfg(df), width='stretch', **kw)
+def fmt_pct(x): return '–' if pd.isna(x) else f'{x:.1f}%'
+def fmt_vnd(x): return '–' if pd.isna(x) else f'{x:,.0f}'
 
 
-def load_multiple_files(uploaded_files):
-    all_data_list, sl_list, hoan_list = [], [], []
-    all_sans  = set()
-    errors    = []
-    month_map = {}
-    for uf in uploaded_files:
-        try:
-            fb = uf.read()
-            d, s, h, sans, _, mk, ml = load_and_parse(fb, uf.name)
-            if len(d) > 0:
-                all_data_list.append(d)
-                all_sans.update(sans)
-            if len(s) > 0: sl_list.append(s)
-            if len(h) > 0: hoan_list.append(h)
-            if mk: month_map[mk] = ml
-        except Exception as e:
-            errors.append(f"❌ {uf.name}: {e}")
-    all_data  = pd.concat(all_data_list, ignore_index=True) if all_data_list else pd.DataFrame()
-    sl_data   = pd.concat(sl_list,       ignore_index=True) if sl_list       else pd.DataFrame()
-    hoan_data = pd.concat(hoan_list,     ignore_index=True) if hoan_list     else pd.DataFrame()
-    sorted_keys    = sorted(month_map.keys())
-    ordered_labels = [month_map[k] for k in sorted_keys]
-    label_to_key   = {v: k for k, v in month_map.items()}
-    return all_data, sl_data, hoan_data, sorted(all_sans), errors, sorted_keys, ordered_labels, label_to_key
 
-
-# ══════════════════════════════════════════════════════════════════════
-# SIDEBAR – FILE UPLOAD
-# ══════════════════════════════════════════════════════════════════════
-with st.sidebar:
-    st.markdown("### 📂 Tải lên dữ liệu")
-    uploaded_files = st.file_uploader(
-        "Kéo thả file Excel vào đây",
-        type=["xlsx","xls"],
-        accept_multiple_files=True,
-        help="Mỗi file = 1 tháng. Đặt tên file chứa tháng, vd: thang3.xlsx, T04-2024.xlsx"
-    )
-    st.markdown("---")
-
-
-# ══════════════════════════════════════════════════════════════════════
-# LANDING PAGE
-# ══════════════════════════════════════════════════════════════════════
-if not uploaded_files:
-    st.markdown("""
-    <div class="upload-zone">
-        <div style="font-size:4rem;margin-bottom:20px;filter:drop-shadow(0 4px 12px rgba(59,130,246,0.4))">📊</div>
-        <h1>Phân Tích Doanh Số TMĐT</h1>
-        <p style="font-size:1.05rem;margin-top:10px">TiktokShop &nbsp;·&nbsp; Shopee &nbsp;·&nbsp; Lazada</p>
-        <br>
-        <p>👈 <strong>Kéo thả file Excel</strong> vào ô bên trái để bắt đầu</p>
-        <p style="margin-top:8px;font-size:0.83rem;opacity:0.45">
-            Hỗ trợ nhiều file cùng lúc · Mỗi file = 1 tháng · Xuất báo cáo Excel đẹp
-        </p>
-        <p style="margin-top:6px;font-size:0.78rem;opacity:0.35">
-            Tên file gợi ý: <code>thang3.xlsx</code> &nbsp;·&nbsp; <code>T04-2024.xlsx</code>
-            &nbsp;·&nbsp; <code>thang 5 2024.xlsx</code>
-        </p>
-    </div>""", unsafe_allow_html=True)
-
-    c1, c2, c3, c4 = st.columns(4)
-    for col, icon, title, desc in zip(
-        [c1, c2, c3, c4],
-        ["🏪", "📅", "💸", "📥"],
-        ["Hiệu suất Sàn", "Phân tích Tháng", "Lợi nhuận & Rủi ro", "Xuất Excel Đẹp"],
-        [
-            "So sánh doanh thu, giá vốn, lợi nhuận giữa 3 sàn TMĐT",
-            "Trend line, grouped bar tháng × sàn, pivot table, biên LN%",
-            "Waterfall dòng tiền, ma trận rủi ro, đơn hoàn hàng",
-            "Báo cáo Excel nhiều sheet, format chuyên nghiệp, có thể in",
-        ]
-    ):
-        with col:
-            st.markdown(f"""
-            <div class="feat-card">
-                <div style="font-size:2.2rem;margin-bottom:14px">{icon}</div>
-                <div style="font-weight:700;font-size:0.93rem;margin-bottom:8px;color:#0f172a">{title}</div>
-                <div style="font-size:0.79rem;color:#64748b;line-height:1.55">{desc}</div>
-            </div>""", unsafe_allow_html=True)
-    st.stop()
-
-
-# ══════════════════════════════════════════════════════════════════════
-# LOAD DATA
-# ══════════════════════════════════════════════════════════════════════
-with st.spinner("⏳ Đang đọc và phân tích dữ liệu..."):
-    (all_data, sl_data, hoan_data,
-     available_sans, load_errors,
-     sorted_month_keys, ordered_month_labels, label_to_key) = load_multiple_files(uploaded_files)
-
-for err in load_errors:
-    st.warning(err)
-
-if len(all_data) == 0:
-    st.error("❌ Không tìm thấy dữ liệu giao dịch.")
-    st.stop()
-
-file_label = (f"{len(uploaded_files)} file" if len(uploaded_files) > 1
-              else uploaded_files[0].name)
-has_months = len(sorted_month_keys) > 0
-
-
-# ══════════════════════════════════════════════════════════════════════
-# SIDEBAR FILTERS
-# ══════════════════════════════════════════════════════════════════════
-with st.sidebar:
-    st.markdown("### 🎛️ Bộ lọc toàn cục")
-    san_filter = st.multiselect("🏪 Sàn TMĐT", options=available_sans, default=available_sans)
-
-    if has_months:
-        sb_month_sel = st.multiselect(
-            "📅 Tháng", options=ordered_month_labels, default=ordered_month_labels,
-            help="Lọc toàn bộ dashboard."
-        )
-        sb_month_keys = [label_to_key[l] for l in sb_month_sel if l in label_to_key]
+def main():
+    st.set_page_config(page_title='Báo cáo tuyển dụng theo tháng', layout='wide')
+    # ------------------------------------------------------------------ thanh bên
+    st.sidebar.header('Dữ liệu')
+    mode = st.sidebar.radio('Nguồn dữ liệu', ['Tải file lên', 'Thư mục trên máy'], index=(1 if os.environ.get('TD_DATA_DIR') else 0), key='mode')
+    raw = None; names = {}
+    if mode == 'Thư mục trên máy':
+        folder = st.sidebar.text_input('Đường dẫn thư mục chứa các file raw', value=os.environ.get('TD_DATA_DIR', ''), key='folder')
+        if folder:
+            try:
+                sig = tuple(sorted((k, os.path.getmtime(v)) for k, v in find_files(folder).items()))
+                raw, names = load_folder(folder, sig)
+            except Exception as ex: st.sidebar.error(f'Không đọc được: {ex}')
     else:
-        sb_month_sel  = []
-        sb_month_keys = []
-        st.caption("⚠️ Không nhận dạng được tháng.\nĐặt tên file như: thang3.xlsx")
-
-    include_tang = st.checkbox("🎁 Bao gồm hàng tặng", value=False)
-    show_profit  = st.checkbox("✅ Hiển thị hàng có lãi", value=True)
-    show_loss    = st.checkbox("❌ Hiển thị hàng thua lỗ", value=True)
-
-    if 'So_luong' in all_data.columns and not all_data['So_luong'].isna().all():
-        max_sl   = int(all_data['So_luong'].max())
-        sl_range = st.slider("📦 Sản lượng / dòng SP", 0, max(max_sl,1), (0, max(max_sl,1)))
-    else:
-        sl_range = (0, 99999)
-
-    all_brands = []
-    if len(sl_data) > 0 and 'Thuong_hieu' in sl_data.columns:
-        brands = sl_data['Thuong_hieu'].ffill().dropna().unique().tolist()
-        pn = {'tiktok shop','shopee','lazada','tiktokshop'}
-        all_brands = [b for b in brands
-                      if str(b).strip().lower() not in pn
-                      and str(b).strip() not in ['','nan','Thương hiệu']]
-    brand_filter = st.multiselect("🏷️ Thương hiệu", options=all_brands) if all_brands else []
-
-    st.markdown("---")
-    for fn in uploaded_files:
-        st.success(f"✅ {fn.name}")
-    st.caption(f"Sàn: {', '.join(available_sans)}")
-    st.caption(f"Tổng: {len(all_data):,} dòng SP")
-    if has_months:
-        st.caption("📅 " + " · ".join(ordered_month_labels))
-
-
-# ─── Apply filters ────────────────────────────────────────────────────
-def apply_filters(df, month_keys=None, sans=None, tang=None, profit=None, loss=None):
-    d = df.copy()
-    mk = month_keys if month_keys is not None else sb_month_keys
-    if mk and 'Thang_key' in d.columns:
-        d = d[d['Thang_key'].isin(mk)]
-    s = sans if sans is not None else san_filter
-    if s: d = d[d['San'].isin(s)]
-    t = tang if tang is not None else include_tang
-    if not t: d = d[~d['La_hang_tang']]
-    p  = profit if profit is not None else show_profit
-    lo = loss   if loss   is not None else show_loss
-    if not (p and lo):
-        if p:   d = d[d['Loi_nhuan'] >= 0]
-        elif lo: d = d[d['Loi_nhuan'] < 0]
-    if 'So_luong' in d.columns:
-        d = d[d['So_luong'].between(sl_range[0], sl_range[1], inclusive='both') |
-              d['So_luong'].isna()]
-    return d
-
-
-filtered   = apply_filters(all_data)
-tang_items = apply_filters(all_data, tang=True)[lambda x: x['La_hang_tang']]
-
-total_gia_von   = filtered['Tong_gia_von'].sum()
-total_tien_ve   = filtered['Tien_ve_TK'].sum()
-total_loi_nhuan = filtered['Loi_nhuan'].sum()
-total_sl        = filtered['So_luong'].sum()
-total_tang_cost = tang_items['Tong_gia_von'].sum()
-total_hoan      = hoan_data['Tong_gia_von'].sum() if len(hoan_data) > 0 else 0
-profit_margin   = total_loi_nhuan / total_tien_ve * 100 if total_tien_ve > 0 else 0.0
-
-
-# ══════════════════════════════════════════════════════════════════════
-# HEADER
-# ══════════════════════════════════════════════════════════════════════
-months_active = " · ".join(sb_month_sel) if sb_month_sel else "Tất cả"
-st.markdown(f"""
-<div class="dash-header">
-  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
-    <div>
-      <h2>🛍️ Phân Tích Doanh Số Bán Hàng Online</h2>
-      <p>📁 {file_label} &nbsp;|&nbsp; Sàn: {" · ".join(san_filter or ["—"])}
-         &nbsp;|&nbsp; 📅 {months_active}
-         &nbsp;|&nbsp; {"Có hàng tặng" if include_tang else "Không tính hàng tặng"}</p>
-    </div>
-    <div style="opacity:0.55;font-size:0.78rem;text-align:right;line-height:1.7">
-        Hiển thị <b style="color:#93c5fd">{len(filtered):,}</b> dòng SP
-    </div>
-  </div>
-</div>""", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════
-# KPI ROW
-# ══════════════════════════════════════════════════════════════════════
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-with c1:
-    st.markdown(kpi_card("💰","Tiền Về TK",
-                         f"{total_tien_ve/1e6:.2f}M₫","Dự kiến nhận về","#3b82f6"), unsafe_allow_html=True)
-with c2:
-    st.markdown(kpi_card("📦","Tổng Giá Vốn",
-                         f"{total_gia_von/1e6:.2f}M₫","Giá vốn hàng bán","#8b5cf6"), unsafe_allow_html=True)
-with c3:
-    clr = "#22c55e" if total_loi_nhuan >= 0 else "#ef4444"
-    st.markdown(kpi_card("📊","Lợi Nhuận",f"{total_loi_nhuan/1e6:.2f}M₫","Sau giá vốn",clr,
-                         f"Biên LN: {profit_margin:.1f}%","#22c55e" if profit_margin>=0 else "#ef4444"),
-                unsafe_allow_html=True)
-with c4:
-    st.markdown(kpi_card("🛒","Sản Lượng",
-                         f"{int(total_sl):,}","Tổng SP bán ra","#f59e0b"), unsafe_allow_html=True)
-with c5:
-    st.markdown(kpi_card("🎁","Hàng Tặng",
-                         f"{total_tang_cost/1e6:.2f}M₫","Chi phí giá vốn tặng","#ec4899"), unsafe_allow_html=True)
-with c6:
-    st.markdown(kpi_card("↩️","Hàng Hoàn",
-                         f"{total_hoan/1e6:.2f}M₫",f"{len(hoan_data)} dòng","#ef4444"), unsafe_allow_html=True)
-st.markdown("<br>", unsafe_allow_html=True)
-
-CHART_THEME = dict(
-    plot_bgcolor='white', paper_bgcolor='white',
-    font=dict(family='Plus Jakarta Sans, sans-serif', size=11),
-    margin=dict(t=50, b=30, l=10, r=10)
-)
-COLORS_SAN = {'TiktokShop':'#fe2c55','Shopee':'#f97316','Lazada':'#6366f1'}
-
-
-# ══════════════════════════════════════════════════════════════════════
-# TABS
-# ══════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab_month, tab4, tab5 = st.tabs([
-    "🏪 Hiệu suất Sàn", "📦 Sản phẩm", "💸 Lợi nhuận",
-    "📅 Theo Tháng", "↩️ Hoàn hàng & Rủi ro", "🔍 Dữ liệu & Xuất"
-])
-
-
-def tab_month_filter(tab_key, label=""):
-    if not has_months: return sb_month_keys
-    with st.expander(f"🔽 Lọc tháng riêng cho tab này (mặc định theo Sidebar)", expanded=False):
-        st.markdown('<div class="tab-filter-bar">', unsafe_allow_html=True)
-        sel = st.multiselect(
-            f"📅 Tháng{' — ' + label if label else ''}",
-            options=ordered_month_labels, default=sb_month_sel, key=tab_key
-        )
-        st.caption("Để trống = dùng filter tháng từ Sidebar.")
-        st.markdown('</div>', unsafe_allow_html=True)
-    keys = [label_to_key[l] for l in sel if l in label_to_key]
-    return keys if keys else sb_month_keys
-
-
-# ════════════════════════════════════════
-# TAB 1 – HIỆU SUẤT SÀN
-# ════════════════════════════════════════
-with tab1:
-    t1_keys = tab_month_filter('t1_mf', 'Hiệu suất Sàn')
-    f1 = apply_filters(all_data, month_keys=t1_keys)
-
-    st.markdown('<div class="sec-title">🏪 So Sánh Hiệu Suất Các Sàn TMĐT</div>', unsafe_allow_html=True)
-    ps = f1.groupby('San').agg(
-        Tong_gia_von=('Tong_gia_von','sum'), Tien_ve_TK=('Tien_ve_TK','sum'),
-        Loi_nhuan=('Loi_nhuan','sum'), So_luong=('So_luong','sum'),
-        So_dong=('Ten_hang_hoa','count')
-    ).reset_index()
-    ps['Bien_LN'] = ps.apply(
-        lambda r: round(r['Loi_nhuan']/r['Tien_ve_TK']*100, 1) if r['Tien_ve_TK']>0 else 0.0, axis=1)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        fig = go.Figure()
-        fig.add_bar(name='Giá vốn', x=ps['San'], y=ps['Tong_gia_von'], marker_color='#cbd5e1',
-                    text=(ps['Tong_gia_von']/1e6).round(2), texttemplate='%{text:.2f}M₫', textposition='outside')
-        fig.add_bar(name='Tiền về TK', x=ps['San'], y=ps['Tien_ve_TK'], marker_color='#3b82f6',
-                    text=(ps['Tien_ve_TK']/1e6).round(2), texttemplate='%{text:.2f}M₫', textposition='outside')
-        fig.update_layout(title='💰 Giá vốn vs Tiền về TK', barmode='group', height=370,
-                          **CHART_THEME, legend=dict(orientation='h', y=-0.22))
-        st.plotly_chart(fig, use_container_width=True)
-    with col2:
-        bar_colors = ['#22c55e' if v >= 0 else '#ef4444' for v in ps['Loi_nhuan']]
-        fig2 = go.Figure()
-        fig2.add_bar(x=ps['San'], y=ps['Loi_nhuan'], marker_color=bar_colors,
-                     text=(ps['Loi_nhuan']/1e6).round(2), texttemplate='%{text:.2f}M₫', textposition='outside')
-        fig2.add_hline(y=0, line_dash='dash', line_color='#94a3b8', line_width=1.5)
-        fig2.update_layout(title='📊 Lợi nhuận theo sàn', height=370, **CHART_THEME)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    col3, col4 = st.columns(2)
-    with col3:
-        fig3 = px.pie(ps, values='So_luong', names='San', title='🛒 Phân bổ sản lượng',
-                      color='San', color_discrete_map=COLORS_SAN, hole=0.48)
-        fig3.update_traces(textinfo='label+percent+value', pull=[0.04]*len(ps))
-        fig3.update_layout(height=330, **CHART_THEME)
-        st.plotly_chart(fig3, use_container_width=True)
-    with col4:
-        fig4 = px.pie(ps, values='Tong_gia_von', names='San', title='💸 Phân bổ giá vốn',
-                      color='San', color_discrete_map=COLORS_SAN, hole=0.48)
-        fig4.update_traces(textinfo='label+percent')
-        fig4.update_layout(height=330, **CHART_THEME)
-        st.plotly_chart(fig4, use_container_width=True)
-
-    st.markdown('<div class="sec-title">📋 Bảng tổng hợp</div>', unsafe_allow_html=True)
-    ps_disp = ps.copy()
-    for col in ['Tong_gia_von','Tien_ve_TK','Loi_nhuan']:
-        ps_disp[col] = ps_disp[col].apply(lambda x: f"{x:,.0f}₫")
-    ps_disp['Bien_LN']  = ps_disp['Bien_LN'].apply(lambda x: f"{x:.1f}%")
-    ps_disp['So_luong'] = ps_disp['So_luong'].apply(lambda x: f"{x:.0f}")
-    ps_disp.columns = ['Sàn','Tổng Giá Vốn','Tiền Về TK','Lợi Nhuận','Sản Lượng','Số Dòng SP','Biên LN%']
-    st.dataframe(ps_disp, use_container_width=True, hide_index=True)
-
-    if len(ps) > 0:
-        best  = ps.loc[ps['Loi_nhuan'].idxmax(),'San']
-        worst = ps.loc[ps['Loi_nhuan'].idxmin(),'San']
-        st.markdown(f"""
-        <div class="insight insight-good">✅ <b>Sàn tốt nhất:</b> <b>{best}</b> — lợi nhuận cao nhất.</div>
-        <div class="insight insight-bad">⚠️ <b>Cần xem lại:</b> <b>{worst}</b> — lợi nhuận <b>{ps['Loi_nhuan'].min():,.0f}₫</b>.</div>
-        """, unsafe_allow_html=True)
-
-    # ── Excel export cho tab Sàn ──
-    st.markdown("---")
-    col_dl1, col_dl2 = st.columns([1, 3])
-    with col_dl1:
-        monthly_agg = None
-        if has_months and len(all_data) > 0:
-            monthly_agg = (all_data[~all_data['La_hang_tang']]
-                .groupby(['Thang_key','Thang_label'])
-                .agg(Tien_ve_TK=('Tien_ve_TK','sum'), Tong_gia_von=('Tong_gia_von','sum'),
-                     Loi_nhuan=('Loi_nhuan','sum'), So_luong=('So_luong','sum'))
-                .reset_index())
-            monthly_agg['Bien_LN'] = monthly_agg.apply(
-                lambda r: round(r['Loi_nhuan']/r['Tien_ve_TK']*100,1) if r['Tien_ve_TK']>0 else 0.0, axis=1)
-        excel_bytes = export_excel_bytes(
-            filtered_df=f1, sl_df=sl_data, hoan_df=hoan_data,
-            monthly_df=monthly_agg, san_summary_df=ps,
-            report_info=f"Sàn: {', '.join(san_filter)} | Tháng: {months_active}"
-        )
-        st.download_button(
-            "📥 Xuất Excel báo cáo đầy đủ",
-            data=excel_bytes,
-            file_name="bao_cao_tmdt.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-
-
-# ════════════════════════════════════════
-# TAB 2 – SẢN PHẨM
-# ════════════════════════════════════════
-with tab2:
-    t2_keys = tab_month_filter('t2_mf', 'Sản phẩm')
-    f2 = apply_filters(all_data, month_keys=t2_keys)
-    tang2 = f2[f2['La_hang_tang']].copy()
-
-    st.markdown('<div class="sec-title">📦 Phân Tích Sản Phẩm Chi Tiết</div>', unsafe_allow_html=True)
-    fc1, fc2, fc3 = st.columns([2,1,1])
-    with fc1: top_n = st.slider("Top N sản phẩm", 5, 30, 15, key='topn')
-    with fc2: hide_tang_sp = st.checkbox("Ẩn hàng tặng", value=True, key='hide_tang2')
-    with fc3: sort_by = st.selectbox("Xếp theo", ['Sản lượng','Giá vốn'], key='sort_sp')
-
-    if len(sl_data) > 0:
-        sl_disp = sl_data.copy()
-        if has_months and t2_keys:
-            sl_disp = sl_disp[sl_disp['Thang_key'].isin(t2_keys)]
-        if hide_tang_sp: sl_disp = sl_disp[~sl_disp['La_hang_tang']]
-        if brand_filter and 'Thuong_hieu' in sl_disp.columns:
-            sl_disp['Thuong_hieu_fill'] = sl_disp['Thuong_hieu'].ffill()
-            sl_disp = sl_disp[sl_disp['Thuong_hieu_fill'].isin(brand_filter)]
-        sort_col = 'Tong_SL' if sort_by == 'Sản lượng' else 'Gia_von'
-        top_prod = sl_disp.nlargest(top_n, sort_col)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            fig = px.bar(top_prod.sort_values(sort_col), x=sort_col, y='Ten_hang', orientation='h',
-                         title=f'🏆 Top {top_n} sản phẩm ({sort_by})',
-                         color=sort_col, color_continuous_scale='Blues',
-                         labels={sort_col:sort_by,'Ten_hang':''})
-            fig.update_layout(height=520, **CHART_THEME, coloraxis_showscale=False,
-                              yaxis={'categoryorder':'total ascending'})
-            fig.update_traces(texttemplate='%{x:.0f}', textposition='outside')
-            st.plotly_chart(fig, use_container_width=True)
-        with col2:
-            top10 = top_prod.head(10)
-            avail_cols = [c for c in ['Tiktok','Shopee','Lazada'] if c in top10.columns]
-            if avail_cols:
-                melt = top10[['Ten_hang']+avail_cols].melt(id_vars='Ten_hang', var_name='San', value_name='SL')
-                melt = melt[melt['SL'] > 0]
-                fig2 = px.bar(melt, x='SL', y='Ten_hang', color='San', orientation='h',
-                              title='🛒 Phân bổ sản lượng theo sàn (Top 10)',
-                              color_discrete_map={'Tiktok':'#fe2c55','Shopee':'#f97316','Lazada':'#6366f1'},
-                              barmode='stack', labels={'SL':'Sản lượng','Ten_hang':''})
-                fig2.update_layout(height=520, **CHART_THEME,
-                                   yaxis={'categoryorder':'total ascending'},
-                                   legend=dict(orientation='h',y=-0.15))
-                st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown('<div class="sec-title">🎁 Chi Phí Hàng Tặng Kèm</div>', unsafe_allow_html=True)
-    tang_prod2 = (tang2.groupby('Ten_hang_hoa')
-                  .agg(SL=('So_luong','sum'), Chi_phi=('Tong_gia_von','sum'))
-                  .reset_index().sort_values('Chi_phi', ascending=False).head(15))
-    tang_san2  = tang2.groupby('San').agg(SL=('So_luong','sum'), Chi_phi=('Tong_gia_von','sum')).reset_index()
-    c1t, c2t = st.columns(2)
-    with c1t:
-        if len(tang_prod2) > 0:
-            fig3 = px.bar(tang_prod2.sort_values('Chi_phi'), x='Chi_phi', y='Ten_hang_hoa', orientation='h',
-                          title='💸 Chi phí hàng tặng theo loại', color='Chi_phi',
-                          color_continuous_scale='Oranges',
-                          labels={'Chi_phi':'Chi phí (₫)','Ten_hang_hoa':''})
-            fig3.update_layout(height=400, **CHART_THEME, coloraxis_showscale=False)
-            fig3.update_traces(texttemplate='%{x:,.0f}₫', textposition='outside')
-            st.plotly_chart(fig3, use_container_width=True)
-    with c2t:
-        if len(tang_san2) > 0:
-            fig4 = go.Figure()
-            fig4.add_bar(name='SL hàng tặng', x=tang_san2['San'], y=tang_san2['SL'],
-                         marker_color='#fbbf24', text=tang_san2['SL'].round(0),
-                         texttemplate='%{text:.0f}', textposition='outside')
-            fig4.add_scatter(name='Chi phí (₫)', x=tang_san2['San'], y=tang_san2['Chi_phi'],
-                             mode='lines+markers+text', yaxis='y2',
-                             line=dict(color='#ef4444',width=2.5), marker=dict(size=10,color='#ef4444'),
-                             text=(tang_san2['Chi_phi']/1e6).round(2),
-                             texttemplate='%{text:.2f}M₫', textposition='top center')
-            fig4.update_layout(title='🎁 Hàng tặng: SL & Chi phí theo sàn', height=400, **CHART_THEME,
-                               yaxis=dict(title='Sản lượng'),
-                               yaxis2=dict(title='Chi phí', overlaying='y', side='right'),
-                               legend=dict(orientation='h',y=-0.2))
-            st.plotly_chart(fig4, use_container_width=True)
-
-    tang2_gv  = tang2['Tong_gia_von'].sum()
-    f2_gv     = f2['Tong_gia_von'].sum()
-    tang_pct2 = tang2_gv / f2_gv * 100 if f2_gv > 0 else 0
-    st.markdown(
-        f'<div class="insight insight-warn">🎁 <b>Hàng tặng chiếm {tang_pct2:.1f}%</b> tổng giá vốn '
-        f'(<b>{tang2_gv:,.0f}₫</b>). Cần theo dõi chặt!</div>', unsafe_allow_html=True)
-
-
-# ════════════════════════════════════════
-# TAB 3 – LỢI NHUẬN
-# ════════════════════════════════════════
-with tab3:
-    t3_keys = tab_month_filter('t3_mf', 'Lợi nhuận')
-    f3 = apply_filters(all_data, month_keys=t3_keys)
-    tang3 = f3[f3['La_hang_tang']].copy()
-
-    st.markdown('<div class="sec-title">💸 Phân Tích Lợi Nhuận & Cơ Cấu Chi Phí</div>', unsafe_allow_html=True)
-    prod_pnl = f3.groupby('Ten_hang_hoa').agg(
-        Tong_gia_von=('Tong_gia_von','sum'), Tien_ve_TK=('Tien_ve_TK','sum'),
-        Loi_nhuan=('Loi_nhuan','sum'), So_luong=('So_luong','sum'),
-        La_tang=('La_hang_tang','first')
-    ).reset_index()
-    prod_real = prod_pnl[~prod_pnl['La_tang']].copy()
-
-    col1, col2 = st.columns(2)
-    with col1:
-        tp = prod_real.nlargest(12,'Loi_nhuan')
-        fig = px.bar(tp.sort_values('Loi_nhuan'), x='Loi_nhuan', y='Ten_hang_hoa', orientation='h',
-                     title='✅ Top sản phẩm lãi nhiều nhất', color='Loi_nhuan',
-                     color_continuous_scale='Greens', labels={'Loi_nhuan':'Lợi nhuận (₫)','Ten_hang_hoa':''})
-        fig.update_layout(height=460, **CHART_THEME, coloraxis_showscale=False)
-        fig.update_traces(texttemplate='%{x:,.0f}₫', textposition='outside')
-        st.plotly_chart(fig, use_container_width=True)
-    with col2:
-        tl = prod_real.nsmallest(12,'Loi_nhuan')
-        fig2 = px.bar(tl.sort_values('Loi_nhuan',ascending=False), x='Loi_nhuan', y='Ten_hang_hoa',
-                      orientation='h', title='❌ Top sản phẩm lỗ nhiều nhất', color='Loi_nhuan',
-                      color_continuous_scale='Reds_r', labels={'Loi_nhuan':'Lợi nhuận (₫)','Ten_hang_hoa':''})
-        fig2.add_vline(x=0, line_dash='dash', line_color='gray')
-        fig2.update_layout(height=460, **CHART_THEME, coloraxis_showscale=False)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown('<div class="sec-title">🪣 Waterfall Dòng Tiền</div>', unsafe_allow_html=True)
-    tv3 = f3['Tien_ve_TK'].sum()
-    gv3 = -f3[~f3['La_hang_tang']]['Tong_gia_von'].sum()
-    tg3 = -tang3['Tong_gia_von'].sum()
-    hv3 = -total_hoan
-    net3 = tv3 + gv3 + tg3 + hv3
-    fig3 = go.Figure(go.Waterfall(
-        measure=["absolute","relative","relative","relative","total"],
-        x=["📥 Tiền về TK","📦 (-) Giá vốn","🎁 (-) Hàng tặng","↩️ (-) Hoàn hàng","💰 Lợi nhuận ròng"],
-        y=[tv3, gv3, tg3, hv3, 0],
-        connector={"line":{"color":"#e2e8f0"}},
-        increasing={"marker":{"color":"#22c55e"}},
-        decreasing={"marker":{"color":"#ef4444"}},
-        totals={"marker":{"color":"#3b82f6"}},
-        text=[f"{tv3/1e6:.2f}M",f"{gv3/1e6:.2f}M",f"{tg3/1e6:.2f}M",f"{hv3/1e6:.2f}M",f"{net3/1e6:.2f}M"],
-        textposition="outside"
-    ))
-    fig3.update_layout(title="💧 Từ Tiền Về TK → Lợi Nhuận Ròng (triệu ₫)", height=420, **CHART_THEME)
-    st.plotly_chart(fig3, use_container_width=True)
-    st.markdown(
-        f'<div class="insight insight-info">ℹ️ <b>Lợi nhuận ròng ({net3/1e6:.2f}M₫)</b> = '
-        f'Tiền về TK − Giá vốn − Chi phí hàng tặng − Giá vốn hoàn hàng.</div>',
-        unsafe_allow_html=True)
-
-    st.markdown('<div class="sec-title">📉 Ma Trận: Sản Lượng vs Lợi Nhuận</div>', unsafe_allow_html=True)
-    sc = prod_real[prod_real['So_luong'] > 0].copy()
-    sc['Bien_LN'] = sc.apply(
-        lambda r: round(r['Loi_nhuan']/r['Tong_gia_von']*100,1) if r['Tong_gia_von']!=0 else 0.0, axis=1)
-    fig4 = px.scatter(sc, x='So_luong', y='Loi_nhuan',
-                      size=sc['Tong_gia_von'].clip(lower=1),
-                      color='Bien_LN', color_continuous_scale='RdYlGn',
-                      hover_name='Ten_hang_hoa', title='🔵 Sản lượng vs Lợi nhuận',
-                      labels={'So_luong':'Sản lượng','Loi_nhuan':'Lợi nhuận (₫)','Bien_LN':'Biên LN%'})
-    fig4.add_hline(y=0, line_dash='dash', line_color='#94a3b8')
-    if len(sc) > 0:
-        fig4.add_vline(x=sc['So_luong'].median(), line_dash='dot', line_color='#3b82f6', opacity=0.5)
-    fig4.update_layout(height=450, **CHART_THEME)
-    st.plotly_chart(fig4, use_container_width=True)
-
-    n_loss = (prod_real['Loi_nhuan'] < 0).sum()
-    if n_loss > 0:
-        wp = prod_real.nsmallest(1,'Loi_nhuan').iloc[0]
-        st.markdown(
-            f'<div class="insight insight-bad">⚠️ <b>{n_loss} sản phẩm</b> đang thua lỗ. '
-            f'SP lỗ nặng nhất: <b>{wp["Ten_hang_hoa"]}</b> với mức lỗ <b>{wp["Loi_nhuan"]:,.0f}₫</b>.</div>',
-            unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="insight insight-good">✅ Tất cả sản phẩm hiện tại đều có lợi nhuận dương!</div>',
-                    unsafe_allow_html=True)
-
-
-# ════════════════════════════════════════
-# TAB THÁNG
-# ════════════════════════════════════════
-with tab_month:
-    st.markdown('<div class="sec-title">📅 Phân Tích Xu Hướng Theo Tháng</div>', unsafe_allow_html=True)
-
-    if not has_months:
-        st.markdown("""
-        <div class="insight insight-info">
-        ℹ️ <b>Để dùng tab này</b>, đặt tên file chứa thông tin tháng. Ví dụ:<br>
-        <code>thang3.xlsx</code> &nbsp;·&nbsp; <code>T04-2024.xlsx</code> &nbsp;·&nbsp;
-        <code>thang 5 2024.xlsx</code> &nbsp;·&nbsp; <code>March2024.xlsx</code>
-        </div>""", unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="tab-filter-bar">', unsafe_allow_html=True)
-        col_mf1, col_mf2, col_mf3 = st.columns([2,1,1])
-        with col_mf1:
-            tm_sel  = st.multiselect("📅 Tháng để phân tích", options=ordered_month_labels,
-                                     default=ordered_month_labels, key='tm_months')
-            tm_keys = [label_to_key[l] for l in tm_sel if l in label_to_key]
-        with col_mf2:
-            tm_san  = st.multiselect("🏪 Sàn", options=available_sans, default=available_sans, key='tm_san')
-        with col_mf3:
-            tm_tang = st.checkbox("🎁 Gồm hàng tặng", value=False, key='tm_tang')
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        if not tm_keys:
-            st.warning("Vui lòng chọn ít nhất 1 tháng.")
-            st.stop()
-
-        df_tm = all_data.copy()
-        if tm_keys: df_tm = df_tm[df_tm['Thang_key'].isin(tm_keys)]
-        if tm_san:  df_tm = df_tm[df_tm['San'].isin(tm_san)]
-        if not tm_tang: df_tm = df_tm[~df_tm['La_hang_tang']]
-
-        monthly = (
-            df_tm.groupby(['Thang_key','Thang_label'])
-            .agg(Tien_ve_TK=('Tien_ve_TK','sum'), Tong_gia_von=('Tong_gia_von','sum'),
-                 Loi_nhuan=('Loi_nhuan','sum'), So_luong=('So_luong','sum'))
-            .reset_index().sort_values('Thang_key')
-        )
-        monthly['Bien_LN'] = monthly.apply(
-            lambda r: round(r['Loi_nhuan']/r['Tien_ve_TK']*100,1) if r['Tien_ve_TK']>0 else 0.0, axis=1)
-        monthly_san = (
-            df_tm.groupby(['Thang_key','Thang_label','San'])
-            .agg(Tien_ve_TK=('Tien_ve_TK','sum'), Loi_nhuan=('Loi_nhuan','sum'), So_luong=('So_luong','sum'))
-            .reset_index().sort_values('Thang_key')
-        )
-
-        if len(monthly) >= 2:
-            cur, prv = monthly.iloc[-1], monthly.iloc[-2]
-            def delta(cv, pv):
-                if pv == 0: return "", ""
-                pct = (cv - pv) / abs(pv) * 100
-                return (f"{'▲' if pct>=0 else '▼'} {abs(pct):.1f}% vs {prv['Thang_label']}",
-                        "#22c55e" if pct >= 0 else "#ef4444")
-            d1,c1_ = delta(cur['Tien_ve_TK'],prv['Tien_ve_TK'])
-            d2,c2_ = delta(cur['Loi_nhuan'],prv['Loi_nhuan'])
-            d3,c3_ = delta(cur['So_luong'],prv['So_luong'])
-            st.markdown(f"#### 📌 Tháng gần nhất: **{cur['Thang_label']}**")
-            km1, km2, km3 = st.columns(3)
-            with km1: st.markdown(kpi_card("💰","Tiền về TK",f"{cur['Tien_ve_TK']/1e6:.2f}M₫","","#3b82f6",d1,c1_), unsafe_allow_html=True)
-            with km2: st.markdown(kpi_card("📊","Lợi nhuận",f"{cur['Loi_nhuan']/1e6:.2f}M₫","",
-                                           "#22c55e" if cur['Loi_nhuan']>=0 else "#ef4444",d2,c2_), unsafe_allow_html=True)
-            with km3: st.markdown(kpi_card("🛒","Sản lượng",f"{int(cur['So_luong']):,}","","#f59e0b",d3,c3_), unsafe_allow_html=True)
-            st.markdown("<br>", unsafe_allow_html=True)
-
-        st.markdown('<div class="sec-title">📈 Xu Hướng Tiền Về TK & Lợi Nhuận</div>', unsafe_allow_html=True)
-        c_l, c_r = st.columns(2)
-        with c_l:
-            fig_line = go.Figure()
-            fig_line.add_scatter(x=monthly['Thang_label'], y=monthly['Tien_ve_TK'],
-                                 mode='lines+markers+text', name='Tiền về TK',
-                                 line=dict(color='#3b82f6',width=2.5), marker=dict(size=9),
-                                 text=(monthly['Tien_ve_TK']/1e6).round(2),
-                                 texttemplate='%{text:.2f}M', textposition='top center')
-            fig_line.add_scatter(x=monthly['Thang_label'], y=monthly['Loi_nhuan'],
-                                 mode='lines+markers+text', name='Lợi nhuận',
-                                 line=dict(color='#22c55e',width=2.5,dash='dot'), marker=dict(size=9),
-                                 text=(monthly['Loi_nhuan']/1e6).round(2),
-                                 texttemplate='%{text:.2f}M', textposition='bottom center')
-            fig_line.add_hline(y=0, line_dash='dash', line_color='#94a3b8', line_width=1)
-            fig_line.update_layout(title='📈 Xu hướng Tiền về TK & Lợi nhuận',
-                                   height=400, **CHART_THEME, legend=dict(orientation='h',y=-0.22))
-            st.plotly_chart(fig_line, use_container_width=True)
-        with c_r:
-            fig_bar_m = px.bar(monthly, x='Thang_label', y='So_luong',
-                               title='🛒 Sản lượng theo tháng (màu = biên LN%)',
-                               color='Bien_LN', color_continuous_scale='RdYlGn', text='So_luong',
-                               labels={'Thang_label':'Tháng','So_luong':'Sản lượng','Bien_LN':'Biên LN%'})
-            fig_bar_m.update_traces(texttemplate='%{text:.0f}', textposition='outside')
-            fig_bar_m.update_layout(height=400, **CHART_THEME)
-            st.plotly_chart(fig_bar_m, use_container_width=True)
-
-        st.markdown('<div class="sec-title">🏪 So Sánh Tháng × Sàn</div>', unsafe_allow_html=True)
-        metric_opt = st.selectbox("Chỉ tiêu", ['Tiền về TK','Lợi nhuận','Sản lượng'], key='tm_metric')
-        mc = {'Tiền về TK':'Tien_ve_TK','Lợi nhuận':'Loi_nhuan','Sản lượng':'So_luong'}[metric_opt]
-        is_sl = mc == 'So_luong'
-        text_v = monthly_san[mc].apply(lambda v: f"{v:.0f}" if is_sl else f"{v/1e6:.2f}M₫")
-        fig_grp = px.bar(monthly_san, x='Thang_label', y=mc, color='San', barmode='group',
-                         color_discrete_map=COLORS_SAN,
-                         title=f'📊 {metric_opt} theo Tháng & Sàn', text=text_v,
-                         labels={'Thang_label':'Tháng',mc:metric_opt,'San':'Sàn'})
-        fig_grp.update_traces(textposition='outside')
-        fig_grp.update_layout(height=420, **CHART_THEME, legend=dict(orientation='h',y=-0.2))
-        st.plotly_chart(fig_grp, use_container_width=True)
-
-        st.markdown('<div class="sec-title">📉 Biên Lợi Nhuận (%) Theo Tháng</div>', unsafe_allow_html=True)
-        fig_bien = go.Figure()
-        fig_bien.add_bar(x=monthly['Thang_label'], y=monthly['Bien_LN'],
-                         marker_color=['#22c55e' if v >= 0 else '#ef4444' for v in monthly['Bien_LN']],
-                         text=monthly['Bien_LN'].apply(lambda v: f"{v:.1f}%"), textposition='outside')
-        fig_bien.add_hline(y=0, line_dash='dash', line_color='#94a3b8')
-        if len(monthly) > 1:
-            avg = monthly['Bien_LN'].mean()
-            fig_bien.add_hline(y=avg, line_dash='dot', line_color='#3b82f6',
-                               annotation_text=f"TB: {avg:.1f}%", annotation_position="top right")
-        fig_bien.update_layout(title='📉 Biên lợi nhuận % từng tháng',
-                               height=360, **CHART_THEME, yaxis_title='Biên LN (%)')
-        st.plotly_chart(fig_bien, use_container_width=True)
-
-        st.markdown('<div class="sec-title">📋 Bảng Pivot: Tháng × Sàn</div>', unsafe_allow_html=True)
-        pv_metric = st.selectbox("Chỉ tiêu pivot",
-                                 ['Tien_ve_TK','Loi_nhuan','So_luong'],
-                                 format_func=lambda x: {'Tien_ve_TK':'Tiền về TK',
-                                                        'Loi_nhuan':'Lợi nhuận',
-                                                        'So_luong':'Sản lượng'}[x],
-                                 key='pv_metric')
-        pv_is_sl = pv_metric == 'So_luong'
-        pivot = monthly_san.pivot_table(index='Thang_label', columns='San', values=pv_metric,
-                                        aggfunc='sum', fill_value=0)
-        order_map = {r['Thang_label']:r['Thang_key']
-                     for _,r in monthly_san.drop_duplicates('Thang_label').iterrows()}
-        pivot = pivot.loc[sorted(pivot.index, key=lambda x: order_map.get(x,x))]
-        pivot['📦 Tổng'] = pivot.sum(axis=1)
-        pivot_disp = pivot.copy()
-        for c in pivot_disp.columns:
-            pivot_disp[c] = pivot_disp[c].apply(
-                lambda x: f"{x:.0f}" if pv_is_sl else f"{x/1e6:.3f}M₫")
-        pivot_disp.index.name = 'Tháng'
-        st.dataframe(pivot_disp, use_container_width=True)
-
-        if len(monthly) >= 2:
-            bm = monthly.loc[monthly['Loi_nhuan'].idxmax()]
-            wm = monthly.loc[monthly['Loi_nhuan'].idxmin()]
-            g  = ((monthly['Tien_ve_TK'].iloc[-1]-monthly['Tien_ve_TK'].iloc[-2]) /
-                  abs(monthly['Tien_ve_TK'].iloc[-2])*100
-                  if monthly['Tien_ve_TK'].iloc[-2] != 0 else 0)
-            st.markdown(f"""
-            <div class="insight insight-good">🏆 <b>Tháng tốt nhất:</b> {bm['Thang_label']} — Lợi nhuận
-            <b>{bm['Loi_nhuan']/1e6:.2f}M₫</b>, biên LN <b>{bm['Bien_LN']:.1f}%</b>.</div>
-            <div class="insight {'insight-good' if g>=0 else 'insight-bad'}">
-            {'📈' if g>=0 else '📉'} <b>{monthly.iloc[-1]['Thang_label']}:</b>
-            Tiền về TK {"tăng" if g>=0 else "giảm"} <b>{abs(g):.1f}%</b>
-            so với {monthly.iloc[-2]['Thang_label']}.</div>
-            <div class="insight insight-warn">⚠️ <b>Tháng thấp nhất:</b> {wm['Thang_label']} —
-            Lợi nhuận <b>{wm['Loi_nhuan']/1e6:.2f}M₫</b>.</div>
-            """, unsafe_allow_html=True)
-        elif len(monthly) == 1:
-            st.markdown('<div class="insight insight-info">ℹ️ Đang xem 1 tháng. '
-                        'Tải thêm file từ các tháng khác để so sánh xu hướng.</div>',
-                        unsafe_allow_html=True)
-
-        # ── Excel export tab tháng ──
-        st.markdown("---")
-        excel_tm = export_excel_bytes(
-            filtered_df=df_tm, sl_df=sl_data, hoan_df=hoan_data,
-            monthly_df=monthly, san_summary_df=pd.DataFrame(),
-            report_info=f"Phân tích theo tháng | {', '.join(tm_sel)}"
-        )
-        st.download_button(
-            "📥 Xuất Excel báo cáo theo tháng",
-            data=excel_tm,
-            file_name="bao_cao_theo_thang.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-
-# ════════════════════════════════════════
-# TAB 4 – HOÀN HÀNG & RỦI RO
-# ════════════════════════════════════════
-with tab4:
-    t4_keys = tab_month_filter('t4_mf', 'Hoàn hàng & Rủi ro')
-    f4 = apply_filters(all_data, month_keys=t4_keys)
-
-    st.markdown('<div class="sec-title">↩️ Phân Tích Đơn Hoàn Hàng</div>', unsafe_allow_html=True)
-    if len(hoan_data) > 0:
-        hoan_pct = total_hoan / f4['Tong_gia_von'].sum() * 100 if f4['Tong_gia_von'].sum() > 0 else 0
-        c1, c2, c3 = st.columns(3)
-        with c1: st.markdown(kpi_card("↩️","Dòng SP Hoàn",f"{len(hoan_data)}","Tổng dòng ghi nhận","#ef4444"), unsafe_allow_html=True)
-        with c2: st.markdown(kpi_card("💸","Giá Vốn Bị Hoàn",f"{total_hoan/1e6:.2f}M₫","Tiền vốn đang bị treo","#f59e0b"), unsafe_allow_html=True)
-        with c3: st.markdown(kpi_card("📊","Tỷ Lệ / Giá Vốn",f"{hoan_pct:.1f}%","So với tổng giá vốn","#8b5cf6"), unsafe_allow_html=True)
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        hoan_prod = (hoan_data.groupby('Ten_hang')['Tong_gia_von'].sum()
-                     .reset_index().sort_values('Tong_gia_von', ascending=False))
-        if len(hoan_prod) > 0:
-            fig = px.bar(hoan_prod, x='Ten_hang', y='Tong_gia_von',
-                         title='↩️ Giá vốn bị hoàn theo sản phẩm',
-                         color='Tong_gia_von', color_continuous_scale='Reds',
-                         labels={'Ten_hang':'Sản phẩm','Tong_gia_von':'Giá vốn (₫)'})
-            fig.update_layout(height=360, **CHART_THEME, coloraxis_showscale=False, xaxis_tickangle=-25)
-            fig.update_traces(texttemplate='%{y:,.0f}₫', textposition='outside')
-            st.plotly_chart(fig, use_container_width=True)
-
-        hd = hoan_data[['Ten_hang','So_luong','Gia_von','Tong_gia_von']].copy()
-        hd['Gia_von']      = hd['Gia_von'].apply(lambda x: f"{x:,.0f}₫")
-        hd['Tong_gia_von'] = hd['Tong_gia_von'].apply(lambda x: f"{x:,.0f}₫")
-        hd.columns = ['Tên hàng','SL hoàn','Giá vốn/SP','Tổng giá vốn']
-        st.dataframe(hd, use_container_width=True, hide_index=True)
-        st.markdown(
-            f'<div class="insight insight-bad">↩️ Tỷ lệ hoàn <b>{hoan_pct:.1f}%</b> = '
-            f'<b>{total_hoan:,.0f}₫</b> giá vốn đang bị treo.</div>',
-            unsafe_allow_html=True)
-    else:
-        st.info("✅ Không tìm thấy dữ liệu hoàn hàng.")
-
-    st.markdown('<div class="sec-title">⚠️ Ma Trận Rủi Ro Sản Phẩm</div>', unsafe_allow_html=True)
-    prod_risk = f4[~f4['La_hang_tang']].groupby('Ten_hang_hoa').agg(
-        GV=('Tong_gia_von','sum'), LN=('Loi_nhuan','sum'), SL=('So_luong','sum')
-    ).reset_index()
-
-    def classify_risk(row):
-        if row['LN'] >= 0: return 'An toàn ✅'
-        if row['GV'] > 500000: return 'Rủi ro cao 🔴'
-        if row['GV'] > 100000: return 'Rủi ro TB 🟡'
-        return 'Rủi ro thấp 🟢'
-
-    prod_risk['Rui_ro'] = prod_risk.apply(classify_risk, axis=1)
-    rc = prod_risk['Rui_ro'].value_counts().reset_index()
-    rc.columns = ['Mức độ','Số SP']
-    color_map_r = {'An toàn ✅':'#22c55e','Rủi ro thấp 🟢':'#84cc16',
-                   'Rủi ro TB 🟡':'#f59e0b','Rủi ro cao 🔴':'#ef4444'}
-    col_r1, col_r2 = st.columns([1,1.3])
-    with col_r1:
-        fig_r = px.pie(rc, values='Số SP', names='Mức độ', title='📊 Phân bổ rủi ro sản phẩm',
-                       color='Mức độ', color_discrete_map=color_map_r, hole=0.42)
-        fig_r.update_layout(height=360, **CHART_THEME)
-        fig_r.update_traces(textinfo='label+percent+value')
-        st.plotly_chart(fig_r, use_container_width=True)
-    with col_r2:
-        high = prod_risk[prod_risk['Rui_ro']=='Rủi ro cao 🔴'].sort_values('LN').head(10)
-        st.markdown("**🔴 Sản phẩm rủi ro cao — cần xử lý ngay:**")
-        if len(high) > 0:
-            for _, row in high.iterrows():
-                nm = str(row['Ten_hang_hoa'])
-                nm = nm[:50] + '…' if len(nm) > 50 else nm
-                st.markdown(f"""<div class="risk-item" style="border-left-color:#ef4444">
-                    ❌ <b>{nm}</b><br>
-                    <span style="color:#94a3b8;font-size:0.79rem">
-                    Lỗ: <b style="color:#ef4444">{row['LN']:,.0f}₫</b>
-                    &nbsp;|&nbsp; GV: {row['GV']:,.0f}₫
-                    &nbsp;|&nbsp; SL: {row['SL']:.0f}</span>
-                </div>""", unsafe_allow_html=True)
+        files = st.sidebar.file_uploader('Kéo thả các file raw vào đây (3–4 file: DATA tuyển dụng, Kế toán Admin, Master Data, Report Facebook Ads). Thứ tự và tên file tùy ý – app tự nhận ra theo nội dung.', type=['xlsx'], accept_multiple_files=True, key='up_all')
+        groups = {}; unknown = []
+        for f_ in (files or []):
+            b_ = f_.getvalue(); kind_, why_ = classify_cached(b_)
+            if kind_: groups.setdefault(kind_, []).append((getattr(f_, 'name', kind_), b_))
+            else: unknown.append((getattr(f_, 'name', '?'), why_))
+        chosen = {}
+        for kind_, lst in groups.items():
+            if len(lst) > 1:
+                opts = [f'{i_ + 1}. {n_}' for i_, (n_, _) in enumerate(lst)]
+                st.sidebar.warning(f'Có {len(lst)} file {KIND_LABEL[kind_]} – chọn file cần dùng:')
+                pick_ = st.sidebar.selectbox('Chọn file ' + KIND_LABEL[kind_], opts, index=len(opts) - 1, key=f'pick_{kind_}')
+                chosen[kind_] = lst[opts.index(pick_)]
+            else: chosen[kind_] = lst[0]
+        for kind_ in ('data', 'kt', 'master', 'ads'):
+            if kind_ in chosen: st.sidebar.caption(f'✅ {KIND_LABEL[kind_]}: {chosen[kind_][0]}')
+        for n_, why_ in unknown: st.sidebar.warning(f'Bỏ qua file "{n_}": {why_}.')
+        miss_ = [KIND_LABEL[k_] for k_ in ('data', 'kt', 'master') if k_ not in chosen]
+        if miss_: st.sidebar.info('Còn thiếu: ' + ', '.join(miss_) + '.')
         else:
-            st.success("✅ Không có sản phẩm ở mức rủi ro cao!")
+            try:
+                raw, names = load_bytes(chosen['data'][1], chosen['kt'][1], chosen['master'][1], chosen['ads'][1] if 'ads' in chosen else None, tuple(len(v_[1]) for v_ in chosen.values()))
+                names = {k_: v_[0] for k_, v_ in chosen.items()}
+            except Exception as ex: st.sidebar.error(f'Không đọc được file đã tải lên: {ex}')
+    if raw is None:
+        st.title('Báo cáo tuyển dụng theo tháng'); st.info('Nhập đường dẫn thư mục (hoặc tải 3–4 file raw lên) ở thanh bên để bắt đầu.'); st.stop()
+
+    years = sorted({int(y) for y in raw['d'].NGAYLL_d.dropna().dt.year.unique() if 2020 <= y <= 2100}) or [2026]
+    year = st.sidebar.selectbox('Năm', years, index=len(years) - 1, key='year')
+    sel = st.sidebar.multiselect('Chọn tháng cần báo cáo', list(MONTHS), default=[9, 11, 12], format_func=lambda m: MONTHS[m], key='months')
+    xl_slot = st.sidebar.container()
+    if names: st.sidebar.caption('File đang dùng: ' + '; '.join(f'{v}' for v in names.values()))
+    st.sidebar.caption(f"Ngày dữ liệu mới nhất: {raw['cutoff']:%d/%m/%Y}")
+    if not sel: st.title('Báo cáo tuyển dụng theo tháng'); st.warning('Chọn ít nhất một tháng.'); st.stop()
+    sel = sorted(sel)
+    has_adj = [m for m in sel if get_adj(year, m)]
+    use_adj = st.sidebar.checkbox('Khớp báo cáo đã duyệt (áp dụng điều chỉnh)', value=True, key='use_adj',
+                                  help='Tháng có điều chỉnh: ' + (', '.join(f'{m:02d}/{year}' for m in sorted(k[1] for k in ADJ if k[0] == year)) or 'không có') + '. Tắt để xem số thuần từ raw.')
+    if use_adj and has_adj: st.sidebar.caption('Đang áp dụng điều chỉnh cho: ' + ', '.join(f'T{m:02d}' for m in has_adj))
+    elif not use_adj: st.sidebar.caption('Đang xem số thuần từ raw (chưa điều chỉnh).')
+    manual = {}
+    with st.sidebar.expander('Chi phí nhập tay (không có trong raw)'):
+        for m in sel:
+            st.markdown(f'**{MONTHS[m]}**')
+            ad_ = (get_adj(year, m) if use_adj else None) or {}; cp_ = ad_.get('chi_phi_tay', {}); fl = int(bool(ad_))
+            manual[m] = {'CareerViet': st.number_input('CareerViet (VND)', min_value=0.0, step=100000.0, value=float(cp_.get('CareerViet', 0.0)), key=f'cv_{m}_{fl}'),
+                         'TopCV': st.number_input('TopCV (VND)', min_value=0.0, step=100000.0, value=float(cp_.get('TopCV', 0.0)), key=f'tc_{m}_{fl}'),
+                         'Khác': st.number_input('Chi phí khác (VND)', min_value=0.0, step=100000.0, value=0.0, key=f'ot_{m}_{fl}')}
+
+    if 'res' not in st.session_state: st.session_state['res'] = {}
+    def get_result(m):
+        adj = get_adj(year, m) if use_adj else None
+        key = (id(raw), year, m, tuple(sorted(manual[m].items())), bool(adj))
+        if key not in st.session_state['res']:
+            st.session_state['res'][key] = compute_month(raw, year, m, {k: v for k, v in manual[m].items() if v}, adj)
+        return st.session_state['res'][key]
+    results = [get_result(m) for m in sel]
+    def get_deep(R):
+        key = ('deep', id(raw), year, R['month'], R['adjusted'])
+        if key not in st.session_state['res']: st.session_state['res'][key] = analyze_deep(raw, R)
+        return st.session_state['res'][key]
+    def get_trend():
+        key = ('trend', id(raw), year)
+        if key not in st.session_state['res']: st.session_state['res'][key] = trend_year(raw, year)
+        return st.session_state['res'][key]
+
+    st.title('Báo cáo tuyển dụng theo tháng')
+    st.caption('Định nghĩa: CV = ngày liên lạc trong tháng · Tham gia PV = ngày PV trong tháng (Đạt/Đợi KQ/Không đạt) · Pass = ngày PV trong tháng & Đạt · Nhận việc = ngày nhận việc trong tháng & "Đã nhận việc" · Nghỉ việc = hợp Kế toán + Master theo ngày nghỉ.')
+
+    bt_store = {}
+
+    tabs = st.tabs(['📊 So sánh các tháng', f'📈 Xu hướng năm {year}'] + [MONTHS[m] for m in sel])
+    # ------------------------------------------------------------------ so sánh
+    with tabs[0]:
+        cmp_ = compare(results)
+        st.subheader('So sánh chỉ tiêu chính')
+        st.caption('Cột Δ% = % thay đổi giữa hai tháng liền nhau (chỉ tính cho các dòng số lượng/tiền, không tính cho dòng đã là %).')
+        show(cmp_)
+        cnt = cmp_.loc[['Số CV (liên lạc)', 'Tham gia PV', 'Đạt PV (Pass)', 'Nhận việc', 'Nghỉ việc'], [c for c in cmp_.columns if not c.startswith('Δ')]]
+        st.markdown('**Số lượng theo tháng**'); st.bar_chart(cnt.T)
+        pc = cmp_.loc[['% PV / CV', '% Pass / PV', '% Nhận việc / Pass', '% Nhận việc / CV'], [c for c in cmp_.columns if not c.startswith('Δ')]]
+        st.markdown('**Tỷ lệ chuyển đổi (%)**'); st.line_chart(pc.T)
+        empty = [f"{MONTHS[R['month']]}" for R in results if not R['has_data']]
+        if empty: st.warning('Chưa có dữ liệu tuyển dụng cho: ' + ', '.join(empty) + f". Ngày dữ liệu mới nhất trong file: {raw['cutoff']:%d/%m/%Y}.")
+
+    # ------------------------------------------------------------------ từng tháng
+    with tabs[1]:
+        TR = get_trend(); tt = TR['table']
+        st.subheader(f'Xu hướng 12 tháng năm {year}')
+        st.caption('Tính từ dòng raw (không gồm điều chỉnh khớp báo cáo). Tháng chưa có dữ liệu hiện bằng 0.')
+        cols_n = ['CV', 'PV', 'PASS', 'KHONG_DEN_PV', 'NV', 'KHONG_NV', 'NGHI', 'NGHI_TV', 'NGHI_SOM', 'Tăng ròng (NV − Nghỉ)']
+        st.markdown('**Số lượng theo tháng**'); show(tt[cols_n])
+        st.markdown('**Tỷ lệ chuyển đổi và nghỉ việc (%)**'); show(tt[['% PV/CV', '% Pass/PV', '% NV/Pass', '% NV/CV', '% Nghỉ/Nhận việc', '% Nghỉ thử việc/Nghỉ']])
+        l, r_ = st.columns(2)
+        with l: st.markdown('**CV, tham gia PV, Pass, nhận việc**'); st.bar_chart(tt[['CV', 'PV', 'PASS', 'NV']])
+        with r_: st.markdown('**Nhận việc so với nghỉ việc**'); st.bar_chart(tt[['NV', 'NGHI']])
+        st.markdown('**Tỷ lệ chuyển đổi theo tháng (%)**'); st.line_chart(tt[['% PV/CV', '% Pass/PV', '% NV/Pass', '% NV/CV']])
+        st.markdown('**Thay đổi so với tháng trước (%)**'); show(TR['mom'])
+        l, r_ = st.columns(2)
+        with l: st.markdown('**Nhận việc theo nguồn (6 nguồn nhiều nhất)**'); show(TR['src_nv']); st.line_chart(TR['src_nv'].T)
+        with r_: st.markdown('**CV theo nguồn (8 nguồn nhiều nhất)**'); show(TR['src_cv']); st.line_chart(TR['src_cv'].T)
+    for tab, R in zip(tabs[2:], results):
+        m = R['month']; T = R['funnel']; c = R['cost']; K = f'm{m}'
+        with tab:
+            st.header(f"{MONTHS[m]}/{R['year']}  ({R['start']:%d/%m} – {R['end']:%d/%m})")
+            if not R['has_data']: st.warning('Không có CV hoặc nhận việc nào trong tháng này – có thể file chưa cập nhật tới tháng này.')
+            elif R['end'] > R['cutoff']: st.info(f"Tháng chưa trọn: dữ liệu mới nhất đến {R['cutoff']:%d/%m/%Y}. Số liệu còn thay đổi.")
+            if R['adjusted']:
+                ad = R['adj']; st.success(f"Đã khớp báo cáo đã duyệt: {ad.get('ten', '')}. Số liệu dưới đây gồm các điều chỉnh liệt kê trong khung bên dưới (tắt ở thanh bên để xem số thuần từ raw).")
+                if R['adj_baseline_diff']:
+                    nm_ = {'CV': 'số CV', 'PV': 'tham gia PV', 'PASS': 'Pass', 'KHONG_DAT': 'không đạt', 'DOI_KQ': 'đợi kết quả', 'KHONG_DEN_PV': 'không đến PV', 'NV': 'nhận việc', 'KHONG_NV': 'không nhận việc', 'NGHI': 'nghỉ việc'}
+                    st.warning('⚠️ File raw hiện tại khác bản raw dùng để lập các điều chỉnh: ' + '; '.join(f'{nm_.get(k_, k_)} = {a_} (lúc lập điều chỉnh: {b_})' for k_, (a_, b_) in R['adj_baseline_diff'].items()) + '. Các điều chỉnh có thể không còn đúng – kiểm tra lại hoặc tắt "Khớp báo cáo đã duyệt".')
+                with st.expander('Xem các điều chỉnh đã áp dụng và lý do'):
+                    for x in ad.get('nhan_viec_bo_sung', []): st.markdown(f"- **Thêm người nhận việc** {x['TEN']} ({x['CN']}, {x['NNV']}): {x['ly_do']}")
+                    for k_, dt_, why in ad.get('loai_tru_nghi', []): st.markdown(f"- **Không tính vào nghỉ việc** {k_.title()} (nhận việc {dt_}): {why}")
+                    ly = ad.get('ly_do_delta', {})
+                    for nm, key in (('Theo nguồn', 'delta_nguon'), ('Theo HR', 'delta_hr'), ('Theo chi nhánh (mọi vị trí)', 'delta_unit'), ('Bảng phòng ban/chi nhánh của báo cáo', 'delta_dept')):
+                        if ad.get(key): st.markdown(f"- **{nm}:** " + '; '.join(f'{g_} – {mm}: {v:+d}' for (g_, mm), v in ad[key].items()) + f"  \n  _{ly.get(key.split('_')[1], '')}_")
+                    st.markdown('- **Nhập tay trong báo cáo:** đầu kỳ, số lượng yêu cầu, chi phí CareerViet/TopCV, Facebook Ads 30–31/10, nhóm lý do nghỉ (phân loại tay).')
+            a = st.columns(6)
+            a[0].metric('Số CV', f"{T['CV']:,}"); a[1].metric('Tham gia PV', f"{T['PV']:,}", fmt_pct(pct(T['PV'], T['CV'])) + ' của CV', delta_color='off')
+            a[2].metric('Pass PV', f"{T['PASS']:,}", fmt_pct(pct(T['PASS'], T['PV'])) + ' của PV', delta_color='off'); a[3].metric('Nhận việc', f"{T['NV']:,}", fmt_pct(pct(T['NV'], T['PASS'])) + ' của Pass', delta_color='off')
+            a[4].metric('Nghỉ việc', f"{R['nghi_total']:,}", fmt_pct(pct(R['nghi_total'], T['NV'])) + ' / nhận việc', delta_color='off'); a[5].metric('Chi phí / người nhận việc', fmt_vnd(c['per_nv']))
+
+            Dp = get_deep(R); ins = insights(R, Dp)
+            if ins:
+                st.subheader('Điểm nổi bật')
+                for line in ins: st.markdown('- ' + line)
+            st.subheader('1. Phễu tuyển dụng')
+            fun = pd.DataFrame({'Bước': ['CV (liên lạc)', 'Tham gia PV', 'Đạt PV', 'Nhận việc'], 'Số lượng': [T['CV'], T['PV'], T['PASS'], T['NV']]})
+            fun['% so với bước trước'] = [np.nan] + [pct(fun['Số lượng'][i], fun['Số lượng'][i - 1]) for i in range(1, 4)]; fun['% so với CV'] = [pct(x, T['CV']) for x in fun['Số lượng']]
+            fun = fun.rename(columns={'% so với bước trước': '%so với bước trước', '% so với CV': '%so với CV'})
+            l, r_ = st.columns([3, 2])
+            with l: show(fun.set_index('Bước'))
+            with r_: st.bar_chart(fun.set_index('Bước')['Số lượng'])
+            st.caption(f"Không đạt PV {T['KHONG_DAT']:,} ({fmt_pct(pct(T['KHONG_DAT'], T['PV']))} của PV) · Không đến PV {T['KHONG_DEN_PV']:,} ({fmt_pct(pct(T['KHONG_DEN_PV'], T['PV'] + T['KHONG_DEN_PV']))} số hẹn) · Đợi kết quả {T['DOI_KQ']:,} · Không nhận việc {T['KHONG_NV']:,} ({fmt_pct(pct(T['KHONG_NV'], T['NV'] + T['KHONG_NV']))} trên số được mời nhận việc).")
+
+            def block(title, df, key, extra=''):
+                st.subheader(title); 
+                view = st.radio('Cách tính', ['Theo kỳ (như báo cáo tháng)', 'Theo đợt CV của tháng (cohort)'], horizontal=True, key=f'{K}_{key}_view')
+                if view.startswith('Theo kỳ'): cols = ['CV', 'PV', 'PASS', 'NV', 'KHONG_NV', '%PV/CV', '%Pass/PV', '%NV/Pass', '%NV/CV', '%Không đến PV', '%Tỷ trọng CV', '%Tỷ trọng NV']
+                else: cols = ['CV_DOT', 'DOT_PV', 'DOT_PASS', 'DOT_NV', '%Đợt CV→PV', '%Đợt CV→Pass', '%Đợt CV→NV']
+                show(df[cols]); 
+                if extra: st.caption(extra)
+                top = df.head(12)[['CV', 'PASS', 'NV']] if view.startswith('Theo kỳ') else df.head(12)[['CV_DOT', 'DOT_PASS', 'DOT_NV']]
+                st.bar_chart(top)
+            st.markdown('---')
+            block('2. Theo nguồn CV', R['by_source'], 'src', '"Theo kỳ": mỗi bước tính theo ngày của chính bước đó nên % có thể vượt 100%. "Theo đợt CV": chỉ xét những người liên lạc trong tháng – tỷ lệ luôn ≤100%. Nguồn có ít CV chỉ mang tính tham khảo.')
+            block('3. Theo nhân sự tuyển dụng (HR)', R['by_hr'], 'hr')
+            block('4. Theo chi nhánh / phòng ban', R['by_unit'], 'unit', 'Tính theo cột Chi nhánh trong DATA, gồm mọi vị trí (báo cáo tháng 10 chỉ lọc một số vị trí nên số có thể lớn hơn).')
+            st.subheader('4b. Theo khối'); show(R['by_khoi'][['CV', 'PV', 'PASS', 'NV', '%PV/CV', '%Pass/PV', '%NV/Pass', '%NV/CV']])
+            st.subheader('5. Theo vị trí tuyển (top 15 theo CV)'); show(R['by_pos'].sort_values('CV', ascending=False).head(15)[['CV', 'PV', 'PASS', 'NV', '%PV/CV', '%Pass/PV', '%NV/Pass', '%NV/CV']])
+
+            st.markdown('---'); st.subheader('5b. Biến động nhân sự theo chi nhánh (bố cục báo cáo)')
+            A_ = R['adj'] if R['adjusted'] else {}
+            dk0 = pd.DataFrame({'Đầu kỳ': [A_.get('dau_ky', {}).get(b_) for b_ in BRANCHES], 'SL yêu cầu': [A_.get('sl_yc', {}).get(b_) for b_ in BRANCHES]}, index=BRANCHES, dtype='float')
+            st.caption('Đầu kỳ và Số lượng yêu cầu không có trong raw – nhập vào bảng (tháng 10 đã điền sẵn theo báo cáo).')
+            ed = st.data_editor(dk0, key=f'{K}_dk_{int(R["adjusted"])}', width='stretch')
+            bt = branch_table(R, {k_: v_ for k_, v_ in ed['Đầu kỳ'].items() if v_ == v_}, {k_: v_ for k_, v_ in ed['SL yêu cầu'].items() if v_ == v_}); bt_store[m] = bt; show(bt)
+            st.subheader('5c. Bảng phòng ban / chi nhánh – đúng định nghĩa báo cáo')
+            dr = R['dept_report']
+            if len(dr):
+                dd = dr.copy(); dd.loc['% Tham gia PV / CV'] = [pct(a_, b_) for a_, b_ in zip(dr.loc['Tham gia PV'], dr.loc['Số CV'])]; dd.loc['% Đạt PV / Tham gia PV'] = [pct(a_, b_) for a_, b_ in zip(dr.loc['Đạt PV'], dr.loc['Tham gia PV'])]; dd.loc['% Đã NV / Đạt PV'] = [pct(a_, b_) for a_, b_ in zip(dr.loc['Đã NV'], dr.loc['Đạt PV'])]
+                st.dataframe(dd.style.format('{:,.0f}', subset=pd.IndexSlice[DEPT_METRICS, :]).format('{:.1f}%', na_rep='–', subset=pd.IndexSlice[['% Tham gia PV / CV', '% Đạt PV / Tham gia PV', '% Đã NV / Đạt PV'], :]), width='stretch')
+                st.caption('Chỉ tính các (chi nhánh, vị trí) có trong danh sách ở sheet BC-2026 của file TUYỂN DỤNG - DATA, như báo cáo.')
+            else: st.caption('Không đọc được danh sách vị trí (sheet BC-2026) trong file DATA.')
+            st.subheader('5d. Người hết thử việc trong tháng (còn làm việc)')
+            dtv = R['dat_thu_viec']; q_ = st.columns(len(dtv)); 
+            for c_, (k_, v_) in zip(q_, dtv.items()): c_.metric(k_.title() if k_ != 'TỔNG' else 'Tổng', int(v_))
+            st.caption('Theo ngày cuối thử việc trong Master, trạng thái "Đang làm việc".')
+
+            st.markdown('---'); st.subheader('6. Người nhận việc có giữ được không?')
+            rt = R['retention']
+            b = st.columns(4); b[0].metric('Nhận việc trong tháng', rt['n']); b[1].metric('Đã nghỉ (tính đến nay)', rt['nghi_all'], fmt_pct(pct(rt['nghi_all'], rt['n'])), delta_color='off')
+            b[2].metric('Nghỉ trong 30 ngày', rt['nghi30'], fmt_pct(pct(rt['nghi30'], rt['n'])), delta_color='off'); b[3].metric('Nghỉ trong 60 ngày', rt['nghi60'], fmt_pct(pct(rt['nghi60'], rt['n'])), delta_color='off')
+            if not rt['du_30']: st.warning(f"Chưa đủ 30 ngày sau cuối tháng (dữ liệu đến {R['cutoff']:%d/%m/%Y}) → tỷ lệ nghỉ trong 30 ngày còn thấp hơn thực tế.")
+            show(R['retention_src'].set_index('NGUON')[['NV', 'NGHI', 'NGHI30', '%Đã nghỉ', '%Nghỉ ≤30 ngày']] if len(R['retention_src']) else R['retention_src'])
+            st.caption('Một người được coi là đã nghỉ khi có trong danh sách nghỉ việc (Kế toán/Master) với cùng họ tên và ngày nhận việc lệch ≤7 ngày. Người chưa nhập vào các file nghỉ việc sẽ bị tính là còn làm.')
+
+            st.markdown('---'); st.subheader('7. Nghỉ việc')
+            n = R['nghi_total']
+            d_ = st.columns(4); d_[0].metric('Nghỉ việc', n); d_[1].metric('Nghỉ thử việc (<30 ngày)', R['nghi_tv'], fmt_pct(pct(R['nghi_tv'], n)), delta_color='off')
+            d_[2].metric('Nghỉ ≤10 ngày', R['nghi_early10'], fmt_pct(pct(R['nghi_early10'], n)), delta_color='off'); d_[3].metric('Vào và nghỉ trong cùng tháng', R['nghi_moi'], fmt_pct(pct(R['nghi_moi'], n)), delta_color='off')
+            if n:
+                l, r_ = st.columns(2)
+                with l: st.markdown('**Thời gian làm việc trước khi nghỉ**'); show(R['tenure']); st.bar_chart(R['tenure']['So_nguoi'])
+                with r_: st.markdown('**Theo chi nhánh / bộ phận**'); show(R['nghi_unit'])
+                l, r_ = st.columns(2)
+                with l: st.markdown('**Theo chức vụ (top 15)**'); show(R['nghi_pos'].head(15))
+                with r_: st.markdown('**Theo nguồn của người nghỉ**'); show(R['nghi_src'])
+                st.markdown('**Nhóm lý do nghỉ**'); show(R['nghi_reason'])
+                st.caption('Nhóm lý do do người làm báo cáo phân loại tay (12 nhóm, cộng 71 trong khi tổng nghỉ việc ghi 70 – đúng như báo cáo).' if R['reason_manual'] else 'Nhóm lý do được gán tự động theo từ khóa trong chữ Admin/Master nhập, chỉ để tham khảo.')
+                if len(R['nghi_excluded']): st.warning(f"{len(R['nghi_excluded'])} người có ngày nghỉ trong tháng ở Kế toán/Master nhưng báo cáo không liệt kê nên không tính: " + '; '.join(R['nghi_excluded'].TEN) + '. Cần xác minh.')
+            else: st.caption('Không có ai nghỉ việc trong tháng này theo Kế toán/Master.')
+
+            st.markdown('---'); st.subheader('8. Chi phí tuyển dụng')
+            e = st.columns(5); e[0].metric('Facebook Ads', fmt_vnd(c['fb'])); e[1].metric('Nhập tay (CareerViet/TopCV/khác)', fmt_vnd(sum(c['manual'].values()))); e[2].metric('Tổng chi phí', fmt_vnd(c['total'])); e[3].metric('Chi phí / CV', fmt_vnd(c['per_cv'])); e[4].metric('Chi phí / Pass', fmt_vnd(c['per_pass']))
+            if c['ads_days'] == 0: st.caption('File Facebook Ads không có số liệu của tháng này (hoặc chưa tải lên).')
+            else:
+                st.caption(f"Facebook Ads có {c['ads_days']}/{c['days_in_month']} ngày trong tháng; {c['msg']:,.0f} lượt nhắn tin; chi phí/lượt nhắn tin {fmt_vnd(c['cpm'])}.")
+                ad = R['ads_daily'].set_index('ngay'); st.bar_chart(ad['spend'])
+            if c['total'] == 0: st.caption('Nhập chi phí CareerViet/TopCV ở thanh bên để tính chi phí trên mỗi CV / người nhận việc.')
+
+            st.markdown('---'); st.subheader('9. Độ đầy đủ dữ liệu giữa các file')
+            cv_ = R['coverage']
+            cov = pd.DataFrame({'Chỉ tiêu': ['Người nhận việc (DATA tuyển dụng)', '  – có trong Master Data', '  – có trong Kế toán (NHẬN VIỆC, chi nhánh)', 'Số dòng nhận việc tháng trong Master', 'Số dòng nhận việc tháng trong Kế toán', 'Người nghỉ việc (hợp 3 nguồn)', '  – có trong Master', '  – có trong CHECK LIST', '  – có trong sheet NGHỈ VIỆC'],
+                                'Số lượng': [cv_['nv_data'], cv_['nv_in_master'], cv_['nv_in_kt'], cv_['master_nv_month'], cv_['kt_nv_month'], cv_['nghi_n'], cv_['nghi_in_master'], cv_['nghi_in_ck'], cv_['nghi_in_kq']]})
+            cov['%'] = [np.nan, pct(cv_['nv_in_master'], cv_['nv_data']), pct(cv_['nv_in_kt'], cv_['nv_data']), np.nan, np.nan, np.nan, pct(cv_['nghi_in_master'], cv_['nghi_n']), pct(cv_['nghi_in_ck'], cv_['nghi_n']), pct(cv_['nghi_in_kq'], cv_['nghi_n'])]
+            show(cov.set_index('Chỉ tiêu'))
+            dq = raw['dq']; msgs = []
+            if R['dup_cv']: msgs.append(f"{R['dup_cv']} dòng CV trùng (cùng tên, vị trí, ngày liên lạc, nguồn) – vẫn được đếm như báo cáo.")
+            txtn = dq['text_NGAYPV'] + dq['text_NGAYNV'] + dq['text_NGAYLL'] + dq['text_NGAYNGHI']
+            if txtn: msgs.append(f"{txtn} ô ngày trong DATA nhập dạng chữ (vd \"03/04/2026\"); app đọc theo ngày/tháng/năm, còn công thức Excel của báo cáo bỏ qua các ô này.")
+            if dq['master_nghi_khong_ngay']: msgs.append(f"Master có {dq['master_nghi_khong_ngay']} người trạng thái đã nghỉ nhưng không có ngày nghỉ hợp lệ nên không xếp được vào tháng nào.")
+            if dq['data_thieu_ngay_lien_lac']: msgs.append(f"DATA có {dq['data_thieu_ngay_lien_lac']} dòng thiếu ngày liên lạc nên không được tính vào CV tháng nào.")
+            if cv_['nghi_lech_ngay']: msgs.append(f"{cv_['nghi_lech_ngay']} người nghỉ có ngày nghỉ khác nhau giữa các file (trong đó {cv_['nghi_lech_thang']} người lệch sang tháng khác ở file kia). App lấy ngày theo thứ tự ưu tiên Master → CHECK LIST → sheet NGHỈ VIỆC của Kế toán.")
+            for t_ in msgs: st.caption('⚠️ ' + t_)
+            st.markdown('---'); st.subheader('10. Phân tích chuyên sâu')
+            st.caption('Tính từ dòng raw của tháng (không gồm điều chỉnh khớp báo cáo) nên có thể lệch vài đơn vị so với các bảng ở trên khi đang bật "Khớp báo cáo".')
+            t1, t2, t3, t4, t5, t6 = st.tabs(['Sàng lọc CV', 'Thời gian tuyển', 'Người phỏng vấn', 'Nguồn × chi nhánh / vị trí', 'Lương đề nghị', 'Giữ chân chi tiết'])
+            with t1:
+                if len(Dp['screen']):
+                    st.markdown('**Kết quả đánh giá CV và đi tiếp tới PV / Pass / nhận việc (đợt CV của tháng)**'); show(Dp['screen'])
+                    st.markdown('**Theo nguồn**'); show(Dp['screen_src'][['CV', 'DA_DANH_GIA', 'PHU_HOP', 'LUU', 'KHONG_PHU_HOP', '% Phù hợp', '% Lưu', '% Không phù hợp', '% Phù hợp đi tới PV', '% Phù hợp nhận việc']])
+                    st.markdown('**Theo HR**'); show(Dp['screen_hr'][['CV', 'DA_DANH_GIA', 'PHU_HOP', 'LUU', 'KHONG_PHU_HOP', '% Phù hợp', '% Lưu', '% Không phù hợp', '% Phù hợp đi tới PV', '% Phù hợp nhận việc']])
+                    st.caption('Dựa vào cột ĐÁNH GIÁ trong DATA (Phù hợp / Lưu / Không phù hợp). CV chưa đánh giá được tách riêng.')
+                else: st.caption('Không có CV trong tháng.')
+            with t2:
+                lt = Dp['lead']
+                if lt['n']:
+                    st.markdown(f"**Thời gian tuyển của {lt['n']} người nhận việc trong tháng (ngày)**"); show(lt['stats'])
+                    st.caption('"Ngày sai thứ tự" = ngày PV sớm hơn ngày liên lạc (nhập liệu sai); các dòng này bị loại khỏi trung bình/trung vị.')
+                    l, r_ = st.columns(2)
+                    with l: st.markdown('**Phân bố: liên lạc → nhận việc**'); show(lt['dist']); st.bar_chart(lt['dist']['So_nguoi'])
+                    with r_: st.markdown('**Theo nguồn**'); show(lt['by_source'])
+                    st.markdown('**Theo vị trí (top 15)**'); show(lt['by_pos'])
+                else: st.caption('Không có người nhận việc trong tháng.')
+            with t3:
+                if len(Dp['interv']):
+                    show(Dp['interv']); st.caption('Gom các cách viết tên khác nhau của cùng một người (A Pháp / a Pháp / Pháp) – chỉ mang tính tham khảo. "Nhận việc / Pass" tính trên những người đã Pass trong tháng.')
+                else: st.caption('Không có buổi phỏng vấn trong tháng.')
+            with t4:
+                for ttl, key in (('Nguồn × chi nhánh/bộ phận', 'x_src_unit'), ('Nguồn × vị trí', 'x_src_pos')):
+                    xm = Dp[key]
+                    if xm is None: st.caption('Không có dữ liệu.'); continue
+                    st.markdown(f'**{ttl}** (đợt CV của tháng)')
+                    sel_ = st.radio('Hiển thị', ['% nhận việc / CV', 'Số CV', 'Số nhận việc'], horizontal=True, key=f'{K}_{key}')
+                    if sel_.startswith('%'): st.dataframe(xm['rate'].style.format('{:.1f}%', na_rep='–'), width='stretch')
+                    else: show(xm['cv'] if sel_ == 'Số CV' else xm['nv'])
+                st.caption('Ô trống (–) = không có CV. Ô có ít CV cho tỷ lệ dao động mạnh, xem cùng bảng "Số CV".')
+            with t5:
+                sal = Dp['salary']
+                if sal.get('n'):
+                    st.markdown(f"Có {sal['n']} / {sal['cv']} CV ghi mức lương đề nghị ({sal['cover']:.1f}%). Trung vị {sal['overall']['median']:.1f} triệu, trung bình {sal['overall']['mean']:.1f} triệu.")
+                    show(sal['table']); st.caption('Chỉ những CV có ghi lương mới được tính (thường là đã chốt/đề xuất lương) nên "% nhận việc" ở đây cao hơn mặt bằng chung.')
+                else: st.caption('Không có CV nào ghi mức lương trong tháng.')
+            with t6:
+                rd = Dp['ret']; st.markdown('**Đường cong giữ chân của người nhận việc trong tháng**'); show(rd['curve'])
+                st.caption(f"Chỉ tính người đã đủ số ngày tính tới {R['cutoff']:%d/%m/%Y}. Người chưa có trong file nghỉ việc được coi là còn làm.")
+                for ttl, key in (('Nghỉ trong 30 ngày theo nguồn', 'by_source'), ('theo chi nhánh/bộ phận', 'by_unit'), ('theo vị trí', 'by_pos'), ('theo HR', 'by_hr')):
+                    st.markdown(f'**{ttl}**'); show(rd[key])
+            with st.expander('Danh sách chi tiết người nhận việc'): show(R['nv_list'].drop(columns=['k']), hide_index=True)
+            with st.expander('Danh sách chi tiết người nghỉ việc'): show(R['nghi_list'].drop(columns=['k']) if len(R['nghi_list']) else R['nghi_list'], hide_index=True)
 
 
-# ════════════════════════════════════════
-# TAB 5 – DỮ LIỆU & XUẤT
-# ════════════════════════════════════════
-with tab5:
-    st.markdown('<div class="sec-title">🔍 Tra Cứu & Xuất Dữ Liệu</div>', unsafe_allow_html=True)
+    # ---- xuất Excel (đặt ở thanh bên; dựng lại khi lựa chọn thay đổi)
+    deeps = {R['month']: get_deep(R) for R in results}
+    sig = repr((id(raw), year, tuple(sel), use_adj, tuple((m_, tuple(sorted(manual[m_].items()))) for m_ in sel), tuple((m_, tuple(map(tuple, bt_store[m_].fillna(-1).round(4).values.tolist()))) for m_ in sorted(bt_store))))
+    if st.session_state.get('xl_sig') != sig:
+        st.session_state['xl_bytes'] = export_excel(results, deeps, bt_store, get_trend(), dict(files=names)); st.session_state['xl_sig'] = sig
+    xl_slot.download_button('⬇️ Tải báo cáo Excel (đầy đủ)', st.session_state['xl_bytes'], file_name='Bao_cao_tuyen_dung_' + '_'.join(f'T{m_:02d}' for m_ in sel) + f'_{year}.xlsx', key='dl_all',
+                            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-    fc1, fc2, fc3, fc4, fc5 = st.columns([2,1,1,1,1])
-    with fc1: search = st.text_input("🔎 Tìm sản phẩm / khách hàng", placeholder="Nhập từ khoá...")
-    with fc2: san_det = st.multiselect("Sàn", available_sans, default=available_sans, key='det_san')
-    with fc3:
-        if has_months:
-            month_det = st.multiselect("📅 Tháng", options=ordered_month_labels,
-                                       default=sb_month_sel, key='det_month')
-            month_det_keys = [label_to_key[l] for l in month_det if l in label_to_key]
-        else:
-            month_det_keys = []
-    with fc4: type_det = st.selectbox("Loại hàng", ['Tất cả','Hàng bán','Hàng tặng'])
-    with fc5: pnl_det  = st.selectbox("Lợi nhuận",  ['Tất cả','Có lãi ✅','Thua lỗ ❌'])
-
-    det = all_data.copy()
-    if san_det: det = det[det['San'].isin(san_det)]
-    if has_months and month_det_keys: det = det[det['Thang_key'].isin(month_det_keys)]
-    if type_det == 'Hàng bán':    det = det[~det['La_hang_tang']]
-    elif type_det == 'Hàng tặng': det = det[det['La_hang_tang']]
-    if pnl_det == 'Có lãi ✅':    det = det[det['Loi_nhuan'] >= 0]
-    elif pnl_det == 'Thua lỗ ❌': det = det[det['Loi_nhuan'] < 0]
-    if search:
-        mask = (det['Ten_hang_hoa'].astype(str).str.contains(search,case=False,na=False) |
-                det.get('Khach_hang', pd.Series(dtype=str)).astype(str).str.contains(search,case=False,na=False))
-        det = det[mask]
-
-    total_det_ln = det['Loi_nhuan'].sum()
-    st.markdown(f"""
-    <div style="background:white;border-radius:12px;padding:12px 18px;margin-bottom:14px;
-                box-shadow:0 1px 8px rgba(0,0,0,0.06);font-size:0.84rem;color:#475569;
-                border:1px solid #e8ecf5">
-    📊 <b>{len(det):,}</b> dòng &nbsp;|&nbsp; 🛒 SL: <b>{det['So_luong'].sum():.0f}</b>
-    &nbsp;|&nbsp; 💸 GV: <b>{det['Tong_gia_von'].sum():,.0f}₫</b>
-    &nbsp;|&nbsp; 📥 TK: <b>{det['Tien_ve_TK'].sum():,.0f}₫</b>
-    &nbsp;|&nbsp; 📊 LN:
-    <b style="color:{'#22c55e' if total_det_ln>=0 else '#ef4444'}">{total_det_ln:,.0f}₫</b>
-    </div>""", unsafe_allow_html=True)
-
-    show_cols = [c for c in ['San','Thang_label','Ten_hang_hoa','Khach_hang','So_luong',
-                              'Gia_von','Tong_gia_von','Tien_ve_TK','Loi_nhuan','La_hang_tang']
-                 if c in det.columns]
-    det_disp = det[show_cols].copy()
-    det_disp['La_hang_tang'] = det_disp['La_hang_tang'].map({True:'🎁 Tặng',False:'✅ Bán'})
-    rename_det = {'San':'Sàn','Thang_label':'Tháng','Ten_hang_hoa':'Tên hàng','Khach_hang':'Khách',
-                  'So_luong':'SL','Gia_von':'GV/SP','Tong_gia_von':'T.GV',
-                  'Tien_ve_TK':'Tiền về TK','Loi_nhuan':'Lợi nhuận','La_hang_tang':'Loại'}
-    det_disp.rename(columns=rename_det, inplace=True)
-    st.dataframe(det_disp, use_container_width=True, height=420, hide_index=True)
-
-    # ── Download buttons ──────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("### 📥 Xuất dữ liệu")
-    dl1, dl2, dl3 = st.columns(3)
-
-    # CSV export
-    with dl1:
-        csv_buf = det.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-        st.download_button(
-            "📄 Tải CSV (bộ lọc hiện tại)",
-            data=csv_buf,
-            file_name="tmdt_export_filtered.csv",
-            mime='text/csv',
-            use_container_width=True
-        )
-
-    # Excel full report
-    with dl2:
-        ps_for_excel = all_data.groupby('San').agg(
-            Tong_gia_von=('Tong_gia_von','sum'), Tien_ve_TK=('Tien_ve_TK','sum'),
-            Loi_nhuan=('Loi_nhuan','sum'), So_luong=('So_luong','sum'),
-            So_dong=('Ten_hang_hoa','count')
-        ).reset_index()
-        ps_for_excel['Bien_LN'] = ps_for_excel.apply(
-            lambda r: round(r['Loi_nhuan']/r['Tien_ve_TK']*100,1) if r['Tien_ve_TK']>0 else 0.0, axis=1)
-
-        monthly_for_excel = None
-        if has_months and len(all_data) > 0:
-            monthly_for_excel = (
-                all_data[~all_data['La_hang_tang']]
-                .groupby(['Thang_key','Thang_label'])
-                .agg(Tien_ve_TK=('Tien_ve_TK','sum'), Tong_gia_von=('Tong_gia_von','sum'),
-                     Loi_nhuan=('Loi_nhuan','sum'), So_luong=('So_luong','sum'))
-                .reset_index()
-            )
-            monthly_for_excel['Bien_LN'] = monthly_for_excel.apply(
-                lambda r: round(r['Loi_nhuan']/r['Tien_ve_TK']*100,1) if r['Tien_ve_TK']>0 else 0.0, axis=1)
-
-        excel_full = export_excel_bytes(
-            filtered_df=det, sl_df=sl_data, hoan_df=hoan_data,
-            monthly_df=monthly_for_excel, san_summary_df=ps_for_excel,
-            report_info=f"Sàn: {', '.join(san_det)} | Loại: {type_det} | Lọc: {search or 'tất cả'}"
-        )
-        st.download_button(
-            "📊 Xuất Excel đẹp (bộ lọc hiện tại)",
-            data=excel_full,
-            file_name="bao_cao_tmdt_chitiet.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-
-    # Excel all data
-    with dl3:
-        excel_all = export_excel_bytes(
-            filtered_df=all_data[~all_data['La_hang_tang']],
-            sl_df=sl_data, hoan_df=hoan_data,
-            monthly_df=monthly_for_excel, san_summary_df=ps_for_excel,
-            report_info=f"Toàn bộ dữ liệu | {len(uploaded_files)} file"
-        )
-        st.download_button(
-            "📦 Xuất Excel toàn bộ dữ liệu",
-            data=excel_all,
-            file_name="bao_cao_tmdt_toanbo.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-
-    st.markdown("""
-    <div class="insight insight-info" style="margin-top:8px">
-    ℹ️ File Excel xuất ra gồm nhiều sheet: <b>Tổng quan · Chi tiết · Theo sàn · Theo tháng · Hoàn hàng · Top sản phẩm</b>
-    &nbsp;— Mở bằng Microsoft Excel hoặc Google Sheets.
-    </div>""", unsafe_allow_html=True)
-
-    if len(sl_data) > 0 and 'Thuong_hieu' in sl_data.columns:
-        st.markdown('<div class="sec-title">🏷️ Tổng Hợp Theo Thương Hiệu</div>', unsafe_allow_html=True)
-        sl_b = sl_data.copy()
-        sl_b['TH'] = sl_b['Thuong_hieu'].ffill()
-        pn = {'tiktok shop','shopee','lazada','tiktokshop'}
-        sl_b = sl_b[~sl_b['TH'].astype(str).str.strip().str.lower().isin(pn)]
-        bs = (sl_b[~sl_b['La_hang_tang']].groupby('TH')
-              .agg(So_SP=('Ten_hang','count'), Tong_SL=('Tong_SL','sum'))
-              .reset_index().sort_values('Tong_SL', ascending=False).head(15))
-        bs.columns = ['Thương hiệu','Số mã SP','Tổng SL']
-        fig_b = px.bar(bs, x='Thương hiệu', y='Tổng SL',
-                       title='🏷️ Sản lượng bán theo thương hiệu',
-                       color='Tổng SL', color_continuous_scale='Purples', text='Tổng SL')
-        fig_b.update_layout(height=380, **CHART_THEME, coloraxis_showscale=False, xaxis_tickangle=-30)
-        fig_b.update_traces(texttemplate='%{text:.0f}', textposition='outside')
-        st.plotly_chart(fig_b, use_container_width=True)
-
-
-# ─── FOOTER ──────────────────────────────────────────────────────────
-st.markdown("---")
-months_footer = " · ".join(ordered_month_labels) if ordered_month_labels else "—"
-st.markdown(f"""
-<div style="text-align:center;color:#94a3b8;font-size:0.76rem;padding:12px 0;
-            font-family:'Plus Jakarta Sans',sans-serif">
-    📊 Phân tích TMĐT Online &nbsp;|&nbsp; <code>{file_label}</code>
-    &nbsp;|&nbsp; Sàn: {" · ".join(available_sans)}
-    &nbsp;|&nbsp; 📅 {months_footer}
-    &nbsp;|&nbsp; {len(all_data):,} giao dịch
-    &nbsp;|&nbsp; <span style="opacity:0.5">Phông: Plus Jakarta Sans · Xuất Excel: openpyxl</span>
-</div>""", unsafe_allow_html=True)
+if __name__ == '__main__':
+    main()
