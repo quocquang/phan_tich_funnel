@@ -1174,7 +1174,9 @@ def main():
         dk0 = pd.DataFrame({'Đầu kỳ': [A_.get('dau_ky', {}).get(b_) for b_ in BRANCHES], 'SL yêu cầu': [A_.get('sl_yc', {}).get(b_) for b_ in BRANCHES]}, index=BRANCHES, dtype='float')
         st.caption('Đầu kỳ và Số lượng yêu cầu không có trong raw – nhập vào bảng (tháng 10 đã điền sẵn theo báo cáo).')
         ed = st.data_editor(dk0, key=f'{K}_dk_{int(R["adjusted"])}', width='stretch')
-        bt = branch_table(R, {k_: v_ for k_, v_ in ed['Đầu kỳ'].items() if v_ == v_}, {k_: v_ for k_, v_ in ed['SL yêu cầu'].items() if v_ == v_}); (bt_store.__setitem__(R['month'], bt) if R['is_month'] else None); show(bt)
+        bt = branch_table(R, {k_: v_ for k_, v_ in ed['Đầu kỳ'].items() if v_ == v_}, {k_: v_ for k_, v_ in ed['SL yêu cầu'].items() if v_ == v_})
+        if R['is_month']: bt_store[R['month']] = bt
+        show(bt)
         st.subheader('5c. Bảng phòng ban / chi nhánh – đúng định nghĩa báo cáo')
         dr = R['dept_report']
         if len(dr):
@@ -1322,7 +1324,8 @@ def main():
         allc = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         if not len(allc): st.success('Không phát hiện vấn đề nào trong các tháng đã chọn.')
         else:
-            q = st.columns(4); q[0].metric('Tổng số vấn đề', len(allc)); [q[i + 1].metric(sv_, int((allc['Mức độ'] == sv_).sum())) for i, sv_ in enumerate(['Cao', 'Trung bình', 'Thấp'])]
+            q = st.columns(4); q[0].metric('Tổng số vấn đề', len(allc))
+            for i_, sv_ in enumerate(['Cao', 'Trung bình', 'Thấp']): q[i_ + 1].metric(sv_, int((allc['Mức độ'] == sv_).sum()))
             f1, f2, f3 = st.columns(3)
             sev_ = f1.multiselect('Mức độ', ['Cao', 'Trung bình', 'Thấp'], default=['Cao', 'Trung bình', 'Thấp'], key='chk_sev')
             typ_ = f2.multiselect('Loại vấn đề', sorted(allc['Loại'].unique()), default=[], key='chk_type', help='Để trống = tất cả')
