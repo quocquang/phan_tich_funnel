@@ -1,18 +1,27 @@
 # -*- coding: utf-8 -*-
-"""BÁO CÁO TUYỂN DỤNG THEO THÁNG – một file duy nhất.
+"""BÁO CÁO TUYỂN DỤNG THEO THÁNG / TUẦN – một file duy nhất.
 
-Chạy:   pip install streamlit pandas openpyxl xlsxwriter numpy
-        streamlit run app_tuyen_dung.py
-Thư mục dữ liệu (nhập ở thanh bên hoặc đặt biến môi trường TD_DATA_DIR) cần có 4 file, tên chứa:
-  "TUYỂN DỤNG - DATA" | "KẾ TOÁN ADMIN" | "MASTER DATA" | "Report Tuyển Dụng" (Facebook Ads, tùy chọn).  Hoặc chọn "Tải file lên".
+CÁCH DÙNG (chỉ 3 bước):
+  1. Chạy app:   streamlit run app_tuyen_dung.py      (hoặc đưa file này lên Streamlit Cloud)
+  2. Kéo thả 3–4 file raw vào ô "Kéo thả các file raw" ở thanh bên trái:
+       DATA tuyển dụng | Kế toán Admin Update | Master Data | Report Facebook Ads (không bắt buộc)
+     Tên file và thứ tự tùy ý – app tự nhận ra file nào là file nào theo nội dung.
+  3. Chọn năm + các tháng cần xem. Tải Excel ở nút trên thanh bên.
+(Không cần thư mục. Chỉ khi muốn đọc file có sẵn trên máy thì chọn "Thư mục trên máy" hoặc đặt biến môi trường TD_DATA_DIR.)
+
+Cần cài: pip install streamlit pandas numpy openpyxl xlsxwriter
 
 Định nghĩa (đúng công thức của file DATA / báo cáo tháng 10):
   CV = ngày liên lạc trong tháng | Tham gia PV = ngày PV trong tháng & KQ ∈ {Đạt, Đợi kết quả, Không đạt} | Pass = ngày PV trong tháng & Đạt
   Nhận việc = ngày nhận việc trong tháng & "Đã nhận việc" | Nghỉ việc = hợp CHECK LIST + NGHỈ VIỆC (Kế toán) + Master theo ngày nghỉ; nghỉ thử việc = làm < 30 ngày.
 Công tắc "Khớp báo cáo đã duyệt" áp dụng khối điều chỉnh ADJ (bên dưới) cho tháng có báo cáo; tắt = số thuần từ raw."""
 import io, os, re, glob, datetime, unicodedata, difflib, warnings
-import numpy as np, pandas as pd, openpyxl
+import numpy as np, pandas as pd
 import streamlit as st
+try:
+    import openpyxl, xlsxwriter   # openpyxl: đọc file raw; xlsxwriter: xuất Excel
+except ImportError as _ex:
+    st.error(f'Thiếu thư viện: {_ex.name}. Thêm vào requirements.txt (streamlit, pandas, numpy, openpyxl, xlsxwriter) rồi chạy lại.'); st.stop()
 warnings.filterwarnings('ignore')
 
 # =====================================================================================================
@@ -110,11 +119,12 @@ def find_files(folder):
 
 # ------------------------------------------------------------------ đọc raw
 def kt_block(src, sheet, ncols):
+    """Đọc sheet theo tuần của Kế toán; mỗi dòng trả thêm số dòng trong file gốc ở cuối."""
     ws = openpyxl.load_workbook(_b(src), data_only=True)[sheet]; out = []
-    for r in ws.iter_rows(values_only=True):
+    for i, r in enumerate(ws.iter_rows(values_only=True), start=1):
         if isinstance(r[0], str) and re.match(r'^\s*TU[ẤẦ]N\s*\d+', r[0].upper()): continue
         if r[1] == 'TÌNH TRẠNG' or r[0] == 'Chi nhánh' or all(c is None for c in r[:ncols]): continue
-        out.append(tuple(r[:ncols]))
+        out.append(tuple(r[:ncols]) + (i,))
     return out
 def _open_xl(src, label, sheets):
     """Mở file Excel và báo lỗi tiếng Việt rõ ràng nếu thiếu sheet (thường do chọn nhầm file)."""
@@ -151,8 +161,8 @@ def load_raw(data, kt, master, ads=None):
     _check_headers(list(ck.columns), {0: 'CHI NHANH', 3: 'HO TEN', 7: 'NGAY NHAN VIEC', 9: 'NGAY NGHI VIEC'}, 'sheet CHECK LIST NGHỈ VIỆC (Kế toán)')
     ck = ck.dropna(subset=[ck.columns[3]]).iloc[:, :11]
     ck.columns = ['CN', 'TT', 'MSNV', 'TEN', 'BP', 'CV', 'CD', 'NNV', 'NCTV', 'NNGHI', 'LYDO']
-    kq = pd.DataFrame(kt_block(kt, 'NGHỈ VIỆC', 9), columns=['CN', 'TT', 'TEN', 'CV', 'NNV', 'NNGHI', 'x', 'CRM', 'NLV'])
-    kn = pd.DataFrame(kt_block(kt, 'NHẬN VIỆC', 6), columns=['CN', 'TT', 'TEN', 'CV', 'NNV', 'CRM'])
+    kq = pd.DataFrame(kt_block(kt, 'NGHỈ VIỆC', 9), columns=['CN', 'TT', 'TEN', 'CV', 'NNV', 'NNGHI', 'x', 'CRM', 'NLV', 'ROW'])
+    kn = pd.DataFrame(kt_block(kt, 'NHẬN VIỆC', 6), columns=['CN', 'TT', 'TEN', 'CV', 'NNV', 'CRM', 'ROW'])
     xm = _open_xl(master, 'MASTER DATA', ['1. TỔNG DATA - NHÂN SỰ'])
     ms = pd.read_excel(xm, sheet_name='1. TỔNG DATA - NHÂN SỰ', usecols=range(0, 12))
     _check_headers(list(ms.columns), {0: 'CHI NHANH', 3: 'HO TEN', 7: 'NGAY NHAN VIEC', 9: 'NGAY NGHI VIEC'}, 'sheet 1. TỔNG DATA - NHÂN SỰ (Master)')
@@ -309,10 +319,10 @@ def branch_table(R, dau_ky=None, sl_yc=None):
     out.index.name = 'Chi nhánh'
     return out
 
-def compute_month(raw, y, m, cost_manual=None, adjust=None):
+def compute_month(raw, y, m, cost_manual=None, adjust=None, period=None, label=None):
     """adjust: khối điều chỉnh (dieu_chinh.get(y, m)) để khớp báo cáo đã duyệt; None = số thuần từ raw."""
-    s, e = month_range(y, m); d = raw['d']; nga = raw['nghi_all']; adj = adjust or {}
-    R = dict(year=int(y), month=int(m), start=s, end=e, adjusted=bool(adjust), adj=adj)
+    s, e = (pd.Timestamp(period[0]), pd.Timestamp(period[1])) if period else month_range(y, m); d = raw['d']; nga = raw['nghi_all']; adj = adjust or {}
+    R = dict(year=int(y), month=int(m), start=s, end=e, adjusted=bool(adjust), adj=adj, label=label or f'Tháng {int(m):02d}/{int(y)}', is_month=(period is None))
     in_cv = _in(d.NGAYLL_d, s, e); pvm = _in(d.NGAYPV_d, s, e); nvm = _in(d.NGAYNV_d, s, e)
     T = dict(CV=int(in_cv.sum()), PV=int((pvm & d.KQPV.isin(PVOK)).sum()), PASS=int((pvm & (d.KQPV == 'Đạt')).sum()),
              KHONG_DAT=int((pvm & (d.KQPV == 'Không đạt')).sum()), DOI_KQ=int((pvm & (d.KQPV == 'Đợi kết quả')).sum()), KHONG_DEN_PV=int((pvm & (d.KQPV == 'Không đến pv')).sum()),
@@ -518,7 +528,35 @@ def adj_lines(R):
     for k_, (a_, b_) in R.get('adj_baseline_diff', {}).items(): L.append(f'CẢNH BÁO: raw hiện tại khác raw lúc lập điều chỉnh ở {k_}: {a_} (hiện tại) so với {b_} (khi lập).')
     return L
 
-def export_excel(results, deeps=None, bts=None, trend=None, meta=None):
+def _write_issues(ws, df, F, row=2):
+    cols = list(df.columns); W = {'STT': 6, 'Tháng': 8, 'Mức độ': 11, 'Loại': 40, 'File': 30, 'Sheet': 30, 'Dòng': 8, 'Họ tên': 28, 'Chi tiết': 95, 'Gợi ý xử lý': 60}
+    for j, c in enumerate(cols): ws.write(row, j, c, F['hdr']); ws.set_column(j, j, W.get(c, 16))
+    fm = {'Cao': F['sev_hi'], 'Trung bình': F['sev_mid'], 'Thấp': F['sev_lo']}
+    for i, rec in enumerate(df.itertuples(index=False), start=row + 1):
+        for j, v in enumerate(rec):
+            if v is None or (isinstance(v, float) and np.isnan(v)): ws.write_blank(i, j, None, F['txt'])
+            elif cols[j] == 'Mức độ': ws.write_string(i, j, str(v), fm.get(v, F['txt']))
+            elif isinstance(v, (int, float, np.integer, np.floating)): ws.write_number(i, j, float(v), F['int'])
+            else: ws.write_string(i, j, str(v), F['wrap2'])
+    ws.freeze_panes(row + 1, 2)
+    if len(df): ws.autofilter(row, 0, row + len(df), len(cols) - 1)
+
+def _write_weekly(ws, Wk, Kt, F, title):
+    ws.set_column(0, 0, 34); ws.set_column(1, 24, 13); ws.write(0, 0, title, F['title']); r = 2
+    wt = Wk['table'][['Từ', 'Đến', 'CV', 'PV', 'PASS', 'KHONG_DEN_PV', 'NV', 'KHONG_NV', 'NGHI', 'NGHI_TV', 'NGHI_SOM', '% PV/CV', '% Pass/PV', '% NV/Pass', '% NV/CV', '% Nghỉ/Nhận việc', '% Nghỉ thử việc/Nghỉ']]
+    secs = [('1. Tổng hợp theo tuần (tuần * = bị cắt theo ranh giới tháng; dòng CẢ THÁNG = tổng các tuần)', wt)]
+    for k_, nm_ in (('CV', 'Số CV'), ('PV', 'Tham gia PV'), ('PASS', 'Đạt PV'), ('NV', 'Nhận việc')): secs.append((f'2. Theo HR × tuần – {nm_}', Wk['hr'][k_]))
+    for k_, nm_ in (('CV', 'Số CV'), ('PASS', 'Đạt PV'), ('NV', 'Nhận việc')): secs.append((f'3. Theo nguồn × tuần – {nm_}', Wk['src'][k_]))
+    for k_, nm_ in (('CV', 'Số CV'), ('NV', 'Nhận việc'), ('NGHI', 'Nghỉ việc')): secs.append((f'4. Theo chi nhánh / bộ phận × tuần – {nm_}', Wk['unit'][k_]))
+    if Kt is not None:
+        secs.append(('5. KTV / TVV theo chi nhánh (cả tháng): Đã nhận việc và nghỉ', Kt['cn']))
+        if len(Kt['tenure']): secs.append(('6. Thời gian làm việc trước khi nghỉ (KTV / TVV)', Kt['tenure']))
+    for ttl, df in secs:
+        if df is None or not len(df): continue
+        ws.merge_range(r, 0, r, 8, ttl, F['sec']); r = _write_df(ws, df, r + 1, F)
+    ws.freeze_panes(3, 1)
+
+def export_excel(results, deeps=None, bts=None, trend=None, meta=None, weekly=None, checks=None, custom=None):
     """Xuất toàn bộ báo cáo các tháng đã chọn ra Excel (bytes): mỗi tháng một sheet báo cáo + 3 sheet danh sách; thêm So sánh, Xu hướng, Điều chỉnh, Ghi chú."""
     deeps = deeps or {}; bts = bts or {}; meta = meta or {}; buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine='xlsxwriter', datetime_format='dd/mm/yyyy') as w:
@@ -526,7 +564,7 @@ def export_excel(results, deeps=None, bts=None, trend=None, meta=None):
         F = dict(title=wb.add_format({'bold': True, 'font_size': 14, 'font_color': '#1F3864'}), sec=wb.add_format({'bold': True, 'font_color': '#FFFFFF', 'bg_color': '#2F5597'}),
                  hdr=wb.add_format({'bold': True, 'bg_color': '#D9E1F2', 'border': 1, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center'}), txt=wb.add_format({'border': 1}),
                  int=wb.add_format({'border': 1, 'num_format': '#,##0'}), flt=wb.add_format({'border': 1, 'num_format': '#,##0.0'}), pct=wb.add_format({'border': 1, 'num_format': '0.0"%"'}),
-                 date=wb.add_format({'border': 1, 'num_format': 'dd/mm/yyyy'}), note=wb.add_format({'italic': True, 'font_color': '#595959', 'text_wrap': True, 'valign': 'top'}), wrap=wb.add_format({'text_wrap': True, 'valign': 'top'}))
+                 date=wb.add_format({'border': 1, 'num_format': 'dd/mm/yyyy'}), sev_hi=wb.add_format({'border': 1, 'bg_color': '#FFC7CE'}), sev_mid=wb.add_format({'border': 1, 'bg_color': '#FFEB9C'}), sev_lo=wb.add_format({'border': 1, 'bg_color': '#EDEDED'}), wrap2=wb.add_format({'border': 1, 'text_wrap': True, 'valign': 'top'}), note=wb.add_format({'italic': True, 'font_color': '#595959', 'text_wrap': True, 'valign': 'top'}), wrap=wb.add_format({'text_wrap': True, 'valign': 'top'}))
         def sheet(name):
             ws = wb.add_worksheet(name[:31]); w.sheets[name[:31]] = ws; return ws
         # --- Tổng quan
@@ -538,7 +576,7 @@ def export_excel(results, deeps=None, bts=None, trend=None, meta=None):
             if R['adjusted']: info.append((f"T{R['month']:02d} đã áp dụng điều chỉnh", R['adj'].get('ten', '')))
         for i, (k_, v_) in enumerate(info, start=2): ws.write(i, 0, k_, F['hdr']); ws.write(i, 1, v_, F['txt'])
         r0 = len(info) + 3; ws.write(r0, 0, 'Nội dung các sheet', F['sec']); ws.write(r0, 1, '', F['sec'])
-        for i, (a_, b_) in enumerate([('So sánh tháng', 'Chỉ tiêu chính của các tháng và % thay đổi'), ('Xu hướng năm', '12 tháng của năm (tính từ raw)'), ('Txx Báo cáo', 'Toàn bộ bảng của tháng xx, đánh số mục 1–19'), ('Txx DS nhận việc / DS nghỉ việc / DS đạt TV', 'Danh sách từng người'), ('Điều chỉnh', 'Các điều chỉnh để khớp báo cáo và lý do'), ('Ghi chú', 'Định nghĩa và lưu ý')], start=r0 + 1): ws.write(i, 0, a_, F['txt']); ws.write(i, 1, b_, F['txt'])
+        for i, (a_, b_) in enumerate([('So sánh tháng', 'Chỉ tiêu chính của các tháng và % thay đổi'), ('Xu hướng năm', '12 tháng của năm (tính từ raw)'), ('Txx Báo cáo', 'Toàn bộ bảng của tháng xx, đánh số mục 1–19'), ('Txx DS nhận việc / DS nghỉ việc / DS đạt TV', 'Danh sách từng người'), ('Txx Theo tuần', 'Số liệu từng tuần (thứ Hai–Chủ nhật), theo HR/nguồn/chi nhánh, KTV–TVV'), ('Txx Kiểm tra', 'Tên nghi nhập sai, người chưa nhập, ngày/chi nhánh lệch giữa DATA–Kế toán–Master'), ('Kiểm tra (tất cả)', 'Gộp các vấn đề của mọi tháng đã chọn'), ('Khoảng ngày', 'Báo cáo theo khoảng ngày tùy chọn (nếu bật)'), ('Điều chỉnh', 'Các điều chỉnh để khớp báo cáo và lý do'), ('Ghi chú', 'Định nghĩa và lưu ý')], start=r0 + 1): ws.write(i, 0, a_, F['txt']); ws.write(i, 1, b_, F['txt'])
         # --- So sánh
         ws = sheet('So sánh tháng'); ws.set_column(0, 0, 38); ws.set_column(1, 12, 16); ws.write(0, 0, 'SO SÁNH CÁC THÁNG', F['title']); _write_df(ws, compare(results), 2, F); ws.freeze_panes(3, 1)
         # --- Xu hướng
@@ -574,6 +612,22 @@ def export_excel(results, deeps=None, bts=None, trend=None, meta=None):
             _write_df(ws, dl[list(cols)].rename(columns=cols).reset_index(drop=True) if len(dl) else pd.DataFrame(columns=list(cols.values())), 2, F, widths=wd)
             for j, wv in wd.items(): ws.set_column(j, j, max(12, wv + 2))
             ws.freeze_panes(3, 1)
+        for R in results:
+            m = R['month']; p = f'T{m:02d}'
+            if weekly and m in weekly:
+                ws = sheet(f'{p} Theo tuần'); _write_weekly(ws, weekly[m]['week'], weekly[m].get('ktv'), F, f"SỐ LIỆU THEO TUẦN – THÁNG {m:02d}/{R['year']} (từ raw, không gồm điều chỉnh khớp báo cáo)")
+            if checks and m in checks:
+                ws = sheet(f'{p} Kiểm tra'); ws.write(0, 0, f"KIỂM TRA DỮ LIỆU THÁNG {m:02d}/{R['year']} – tên nghi nhập sai, người chưa nhập, ngày/chi nhánh lệch", F['title']); _write_issues(ws, checks[m], F)
+        if checks:
+            allc = []
+            for R in results:
+                if R['month'] in checks: c_ = checks[R['month']].copy(); c_.insert(1, 'Tháng', f"T{R['month']:02d}"); allc.append(c_)
+            if allc:
+                ws = sheet('Kiểm tra (tất cả)'); ws.write(0, 0, 'KIỂM TRA DỮ LIỆU – TẤT CẢ CÁC THÁNG ĐÃ CHỌN', F['title']); _write_issues(ws, pd.concat(allc, ignore_index=True), F)
+        if custom:
+            Rr, Dr = custom; ws = sheet('Khoảng ngày'); ws.set_column(0, 0, 42); ws.set_column(1, 14, 15); ws.write(0, 0, f"BÁO CÁO THEO KHOẢNG NGÀY: {Rr['label']}", F['title']); ws.write(1, 0, 'Số thuần từ raw (không gồm điều chỉnh khớp báo cáo).', F['note']); r = 3
+            for ttl, df in month_sections(Rr, Dr, branch_table(Rr, None, None)): ws.merge_range(r, 0, r, 8, ttl, F['sec']); r = _write_df(ws, df, r + 1, F)
+            ws.freeze_panes(3, 1)
         # --- Điều chỉnh + Ghi chú
         ws = sheet('Điều chỉnh'); ws.set_column(0, 0, 14); ws.set_column(1, 1, 150); ws.write(0, 0, 'CÁC ĐIỀU CHỈNH ĐỂ KHỚP BÁO CÁO ĐÃ DUYỆT', F['title']); r = 2
         any_adj = False
@@ -588,6 +642,159 @@ def export_excel(results, deeps=None, bts=None, trend=None, meta=None):
 
 
 
+
+# ------------------------------------------------------------------ THEO TUẦN / KTV-TVV / KIỂM TRA DỮ LIỆU
+def iso_weeks(y, m):
+    """Các tuần (thứ Hai → Chủ nhật, số tuần theo năm như sheet Kế toán 'TUẦN 40') cắt theo ranh giới tháng."""
+    s, e = month_range(y, m); out = []; cur = s
+    while cur <= e:
+        end = min(cur + pd.Timedelta(days=6 - cur.weekday()), e); iso = cur.isocalendar()
+        full = (cur.weekday() == 0) and (end.weekday() == 6)
+        out.append(dict(no=int(iso.week), start=cur, end=end, partial=not full, label=f'Tuần {int(iso.week)} ({cur:%d/%m}–{end:%d/%m})' + ('' if full else ' *')))
+        cur = end + pd.Timedelta(days=1)
+    return out
+
+def _funnel_counts(d, s, e):
+    pvm = _in(d.NGAYPV_d, s, e); nvm = _in(d.NGAYNV_d, s, e)
+    return dict(CV=int(_in(d.NGAYLL_d, s, e).sum()), PV=int((pvm & d.KQPV.isin(PVOK)).sum()), PASS=int((pvm & (d.KQPV == 'Đạt')).sum()), KHONG_DEN_PV=int((pvm & (d.KQPV == 'Không đến pv')).sum()),
+                NV=int((nvm & (d.KQNV == 'Đã nhận việc')).sum()), KHONG_NV=int((nvm & (d.KQNV == 'Không nhận việc')).sum()))
+
+def weekly_summary(raw, y, m):
+    """Số liệu theo tuần của một tháng: tổng, theo HR, theo nguồn, theo chi nhánh. Tổng các tuần = số của tháng."""
+    d = raw['d']; nga = raw['nghi_all']; W = iso_weeks(y, m); rows = []; hr = {k: {} for k in ('CV', 'PV', 'PASS', 'NV')}; src = {k: {} for k in ('CV', 'PASS', 'NV')}; unit = {k: {} for k in ('CV', 'NV', 'NGHI')}
+    for w in W:
+        s, e = w['start'], w['end']; T = _funnel_counts(d, s, e); ng = nga[_in(nga.NNGHI, s, e)] if len(nga) else nga
+        T.update(NGHI=len(ng), NGHI_TV=int((ng.days < 30).sum()) if len(ng) else 0, NGHI_SOM=int((ng.days <= 10).sum()) if len(ng) else 0, Tuần=w['label'], Từ=s, Đến=e); rows.append(T)
+        pvm = _in(d.NGAYPV_d, s, e); nvm = _in(d.NGAYNV_d, s, e) & (d.KQNV == 'Đã nhận việc')
+        sets = {'CV': d[_in(d.NGAYLL_d, s, e)], 'PV': d[pvm & d.KQPV.isin(PVOK)], 'PASS': d[pvm & (d.KQPV == 'Đạt')], 'NV': d[nvm]}
+        for k in hr: hr[k][w['label']] = sets[k].groupby('LH').size()
+        for k in src: src[k][w['label']] = sets[k].groupby('NGUON').size()
+        for k in ('CV', 'NV'): unit[k][w['label']] = sets[k].groupby('DON_VI').size()
+        unit['NGHI'][w['label']] = ng.groupby('CN').size() if len(ng) else pd.Series(dtype=int)
+    t = pd.DataFrame(rows).set_index('Tuần'); cnt = ['CV', 'PV', 'PASS', 'KHONG_DEN_PV', 'NV', 'KHONG_NV', 'NGHI', 'NGHI_TV', 'NGHI_SOM']
+    tot = t[cnt].sum(); t.loc['CẢ THÁNG'] = list(tot[cnt]) + [pd.NaT, pd.NaT]; t[cnt] = t[cnt].astype(int)
+    t['% PV/CV'] = [pct(a, b) for a, b in zip(t.PV, t.CV)]; t['% Pass/PV'] = [pct(a, b) for a, b in zip(t.PASS, t.PV)]; t['% NV/Pass'] = [pct(a, b) for a, b in zip(t.NV, t.PASS)]; t['% NV/CV'] = [pct(a, b) for a, b in zip(t.NV, t.CV)]
+    t['% Nghỉ/Nhận việc'] = [pct(a, b) for a, b in zip(t.NGHI, t.NV)]; t['% Nghỉ thử việc/Nghỉ'] = [pct(a, b) for a, b in zip(t.NGHI_TV, t.NGHI)]
+    def piv(dct):
+        out = {}
+        for k, cols in dct.items():
+            df = pd.DataFrame(cols).fillna(0).astype(int); df['Cả tháng'] = df.sum(axis=1); out[k] = df.sort_values('Cả tháng', ascending=False)
+        return out
+    return dict(weeks=W, table=t, hr=piv(hr), src=piv(src), unit=piv(unit))
+
+def nhom_vi_tri(t):
+    """Gom vị trí/chức vụ thành KTV / TVV / Khác (gõ sai dấu vẫn nhận: 'Tư vấn viến' → TVV)."""
+    n = norm(t)
+    if re.match(r'^(KTV|KY THUAT VIE)', n): return 'KTV'
+    if re.match(r'^(TVV|TU VAN VIE)', n): return 'TVV'
+    return 'Khác'
+TENURE_ALT = ['Từ 1–3 ngày', 'Từ 4–7 ngày', 'Từ 8–30 ngày', 'Từ 31–90 ngày', 'Trên 90 ngày']
+def bucket_alt(n): return TENURE_ALT[0] if n <= 3 else TENURE_ALT[1] if n <= 7 else TENURE_ALT[2] if n <= 30 else TENURE_ALT[3] if n <= 90 else TENURE_ALT[4]
+def ktv_tvv(R):
+    """Bảng kiểu dashboard theo dõi: theo chi nhánh × KTV/TVV: Đã nhận việc, nghỉ thử việc / chính thức; kèm thời gian làm việc trước khi nghỉ (1–3, 4–7, 8–30, 31–90, >90 ngày)."""
+    nv = R['nv_list'].copy(); ng = R['nghi_list'].copy(); out = {}
+    if len(nv): nv['NHOM'] = nv.VITRI.map(nhom_vi_tri); nv['CN_N'] = nv.CN.map(norm)
+    if len(ng): ng['NHOM'] = ng.CV.map(nhom_vi_tri); ng['CN_N'] = ng.CN.map(norm); ng['TV'] = ng.days < 30
+    rows = []
+    for b in BRANCHES + ['VĂN PHÒNG / KHÁC']:
+        key = norm(b); rec = {'Chi nhánh': b}
+        for g in ('KTV', 'TVV', 'Khác'):
+            n_ = nv[(nv.NHOM == g) & ((nv.CN_N == key) if b != 'VĂN PHÒNG / KHÁC' else ~nv.CN_N.isin([norm(x) for x in BRANCHES]))] if len(nv) else nv
+            g_ = ng[(ng.NHOM == g) & ((ng.CN_N == key) if b != 'VĂN PHÒNG / KHÁC' else ~ng.CN_N.isin([norm(x) for x in BRANCHES]))] if len(ng) else ng
+            rec[f'{g} – Đã NV'] = len(n_); rec[f'{g} – Nghỉ thử việc'] = int(g_.TV.sum()) if len(g_) else 0; rec[f'{g} – Nghỉ chính thức'] = int((~g_.TV).sum()) if len(g_) else 0; rec[f'{g} – Nghỉ tổng'] = len(g_)
+        rows.append(rec)
+    t = pd.DataFrame(rows).set_index('Chi nhánh'); t.loc['TỔNG'] = t.sum(); out['cn'] = t
+    if len(ng):
+        ng['NHOM_ALT'] = ng.days.map(lambda x: bucket_alt(x) if pd.notna(x) else None)
+        tt = pd.DataFrame({g: ng[ng.NHOM == g].NHOM_ALT.value_counts().reindex(TENURE_ALT).fillna(0).astype(int) for g in ('KTV', 'TVV', 'Khác')}); tt['Tổng'] = tt.sum(axis=1)
+        for g in list(tt.columns): tt[f'% {g}'] = [pct(a, tt[g].sum()) for a in tt[g]]
+        tt.index.name = 'Thời gian làm việc'; out['tenure'] = tt
+    else: out['tenure'] = pd.DataFrame()
+    out['khac_nv'] = nv[nv.NHOM == 'Khác'].VITRI.value_counts() if len(nv) else pd.Series(dtype=int); out['khac_ng'] = ng[ng.NHOM == 'Khác'].CV.value_counts() if len(ng) else pd.Series(dtype=int)
+    return out
+
+SIM_MIN = 0.80
+def _sim(a, b): return difflib.SequenceMatcher(None, a, b).ratio()
+SEV_ORDER = {'Cao': 0, 'Trung bình': 1, 'Thấp': 2}
+def kiem_tra_du_lieu(raw, s, e):
+    """Soát dữ liệu giữa DATA / Kế toán / Master cho kỳ [s, e]: tên nghi nhập sai, người chưa nhập, ngày/chi nhánh lệch, ngày vô lý. Mỗi lỗi kèm file, sheet, số dòng và gợi ý sửa."""
+    d = raw['d']; ms = raw['ms']; kn = raw['kn']; kq = raw['kq']; ck = raw['ck']; nga = raw['nghi_all']; cut = raw['cutoff']; I = []
+    def add(sev, typ, file, sheet, row, name, detail, hint): I.append({'Mức độ': sev, 'Loại': typ, 'File': file, 'Sheet': sheet, 'Dòng': (int(row) if row is not None and not (isinstance(row, float) and np.isnan(row)) else None), 'Họ tên': name, 'Chi tiết': detail, 'Gợi ý xử lý': hint})
+    fd = lambda x: '' if pd.isna(x) else pd.Timestamp(x).strftime('%d/%m/%Y')
+    def near(df, col, dt, days): return df[(df[col] - dt).abs() <= pd.Timedelta(days=days)] if pd.notna(dt) else df.iloc[0:0]
+    # ---- 1) người nhận việc (DATA) có trong Master / Kế toán không; sai tên?
+    nv = d[_in(d.NGAYNV_d, s, e) & (d.KQNV == 'Đã nhận việc')].drop_duplicates(['k', 'NGAYNV_d'])
+    for r in nv.itertuples():
+        for nm, df, skip_vp in (('Master Data', ms, False), ('Kế toán Admin (sheet NHẬN VIỆC)', kn, True)):
+            if skip_vp and r.KHOI == 'Văn Phòng': continue
+            win = near(df, 'NNV_d', r.NGAYNV_d, 7)
+            if len(win[win.k == r.k]): continue
+            cand = win.assign(SIMV=[_sim(r.k, x) for x in win.k])
+            same_cn = lambda a, b: norm(a) == norm(b) or {norm(a), norm(b)} == {'BINH DUONG', 'BINH DUOG'}
+            cand = cand[np.array([((cc.NNV_d == r.NGAYNV_d) and cc.SIMV >= 0.85) or (same_cn(cc.CN, r.CN) and cc.SIMV >= 0.90 and abs((cc.NNV_d - r.NGAYNV_d).days) <= 3) for cc in cand.itertuples()], dtype=bool)].sort_values('SIMV', ascending=False)
+            if len(cand):
+                c = cand.iloc[0]; other = kn if df is ms else ms; oth = near(other, 'NNV_d', r.NGAYNV_d, 7); in_other_same = bool(len(oth[oth.k == r.k])); in_other_cand = bool(len(oth[oth.k == c.k]))
+                who = 'File kia (Kế toán/Master) cũng ghi giống DATA → file "' + nm + '" nhiều khả năng gõ sai' if in_other_same else ('File kia ghi giống ' + nm + ' → DATA nhiều khả năng gõ sai' if in_other_cand else 'Chưa đủ căn cứ biết bên nào đúng')
+                add('Cao', 'Tên nghi nhập sai (nhận việc)', nm, 'DATA TUYỂN DỤNG ↔ ' + nm, (c.ROW if 'ROW' in c.index else (c.name + 2)), r.TEN, f'DATA dòng {r.Index + 2} ghi "{r.TEN}" (nhận việc {fd(r.NGAYNV_d)}); {nm} dòng {(c.ROW if "ROW" in c.index else c.name + 2)} ghi "{c.TEN}" (giống {c.SIMV:.0%}, ngày nhận việc {fd(c.NNV_d)}, chi nhánh {c.CN})', who + '. Sửa cho cùng một cách viết.')
+            else: add('Trung bình', 'Chưa nhập vào file khác (nhận việc)', nm, 'DATA TUYỂN DỤNG → ' + nm, r.Index + 2, r.TEN, f'Có "Đã nhận việc" ngày {fd(r.NGAYNV_d)} ở DATA (chi nhánh {r.CN}, vị trí {r.VITRI}) nhưng không thấy trong {nm}.', f'Bổ sung người này vào {nm}.')
+    # ---- 2) người nghỉ: thiếu ở file nào, bị tách đôi do sai tên, ngày vô lý
+    ng = nga[_in(nga.NNGHI, s, e)].copy() if len(nga) else nga
+    for r in ng.itertuples():
+        miss = [x for x, f_ in (('Master', 'Master'), ('CHECK LIST', 'CHECK LIST'), ('NGHỈ VIỆC (Kế toán)', 'KT NGHỈ VIỆC')) if f_ not in r.src and not (f_ == 'KT NGHỈ VIỆC' and norm(r.CN) == 'VAN PHONG')]
+        if miss: add('Trung bình', 'Người nghỉ chưa nhập đủ ở các file', ', '.join(miss), 'Nghỉ việc', None, r.TEN, f'Nghỉ ngày {fd(r.NNGHI)} (chi nhánh {r.CN}); chỉ có trong: {r.src}.', 'Bổ sung ngày nghỉ vào file còn thiếu: ' + ', '.join(miss))
+        if pd.notna(r.NNV) and r.NNGHI < r.NNV: add('Cao', 'Ngày nghỉ trước ngày nhận việc', r.src, 'Nghỉ việc', None, r.TEN, f'Nhận việc {fd(r.NNV)} nhưng nghỉ {fd(r.NNGHI)} (sớm hơn {int((r.NNV - r.NNGHI).days)} ngày).', 'Kiểm tra lại ngày nhận việc hoặc ngày nghỉ (thường gõ nhầm tháng/năm).')
+        if getattr(r, 'LECH_NGAY', False): add('Trung bình', 'Ngày nghỉ khác nhau giữa các file', r.src, 'Nghỉ việc', None, r.TEN, f'Các file ghi ngày nghỉ khác nhau (app lấy {fd(r.NNGHI)}, ưu tiên Master → CHECK LIST → NGHỈ VIỆC).', 'Thống nhất một ngày nghỉ trong cả 3 file.')
+    ngs = ng.sort_values('NNGHI').reset_index(drop=True)
+    for i in range(len(ngs)):
+        for j in range(i + 1, len(ngs)):
+            if (ngs.NNGHI[j] - ngs.NNGHI[i]).days > 3: break
+            a, b = ngs.iloc[i], ngs.iloc[j]
+            if a.k != b.k and _sim(a.k, b.k) >= 0.85 and (pd.isna(a.NNV) or pd.isna(b.NNV) or abs((a.NNV - b.NNV).days) <= 7):
+                add('Cao', 'Một người nghỉ bị tách thành 2 vì sai tên (đang đếm 2 lần)', f'{a.src} | {b.src}', 'Nghỉ việc', None, f'{a.TEN} / {b.TEN}', f'"{a.TEN}" ({a.src}, nghỉ {fd(a.NNGHI)}) và "{b.TEN}" ({b.src}, nghỉ {fd(b.NNGHI)}) giống {_sim(a.k, b.k):.0%}, cùng ngày nhận việc gần nhau → nhiều khả năng là một người.', 'Sửa tên cho giống nhau; số nghỉ việc sẽ giảm 1 khi gộp.')
+    # ---- 3) logic ngày trong DATA
+    x = d[_in(d.NGAYLL_d, s, e) | _in(d.NGAYPV_d, s, e) | _in(d.NGAYNV_d, s, e)]
+    def rows(mask, sev, typ, detail_fn, hint):
+        for r in x[mask.reindex(x.index, fill_value=False)].itertuples(): add(sev, typ, 'TUYỂN DỤNG - DATA', 'DATA TUYỂN DỤNG', r.Index + 2, r.TEN, detail_fn(r), hint)
+    rows(x.NGAYPV_d < x.NGAYLL_d, 'Trung bình', 'Ngày PV sớm hơn ngày liên lạc', lambda r: f'Liên lạc {fd(r.NGAYLL_d)} nhưng PV {fd(r.NGAYPV_d)}.', 'Thường gõ nhầm ngày/tháng; sửa lại một trong hai ngày.')
+    rows(x.NGAYNV_d < x.NGAYPV_d, 'Trung bình', 'Ngày nhận việc sớm hơn ngày PV', lambda r: f'PV {fd(r.NGAYPV_d)} nhưng nhận việc {fd(r.NGAYNV_d)}.', 'Sửa lại ngày PV hoặc ngày nhận việc.')
+    rows((x.KQNV == 'Đã nhận việc') & x.NGAYNV_d.isna(), 'Cao', 'Đã nhận việc nhưng thiếu ngày nhận việc', lambda r: f'Kết quả "Đã nhận việc", liên lạc {fd(r.NGAYLL_d)}, chi nhánh {r.CN}; không có ngày nhận việc nên không vào số liệu tuần/tháng nào.', 'Điền ngày nhận việc.')
+    rows(x.KQPV.isin(PVOK) & x.NGAYPV_d.isna(), 'Trung bình', 'Có kết quả PV nhưng thiếu ngày PV', lambda r: f'Kết quả PV "{r.KQPV}", liên lạc {fd(r.NGAYLL_d)}; không có ngày PV nên không được tính vào Tham gia PV / Pass.', 'Điền ngày PV.')
+    rows(x.NGAYNV_d.notna() & x.KQNV.isna(), 'Trung bình', 'Có ngày nhận việc nhưng chưa có kết quả nhận việc', lambda r: f'Ngày nhận việc {fd(r.NGAYNV_d)} nhưng ô kết quả trống.', 'Chọn "Đã nhận việc" hoặc "Không nhận việc".')
+    rows(_in(x.NGAYLL_d, s, e) & (x.NGUON == '(không ghi nguồn)'), 'Thấp', 'Thiếu nguồn CV', lambda r: f'Liên lạc {fd(r.NGAYLL_d)}, chi nhánh {r.CN}.', 'Điền nguồn để tính đúng hiệu quả từng nguồn.')
+    rows(_in(x.NGAYLL_d, s, e) & (x.LH == '(không ghi người LH)'), 'Thấp', 'Thiếu người liên hệ', lambda r: f'Liên lạc {fd(r.NGAYLL_d)}, nguồn {r.NGUON}.', 'Điền người liên hệ (HR).')
+    for col, nm in (('NGAYLL_d', 'liên lạc'), ('NGAYPV_d', 'PV'), ('NGAYNV_d', 'nhận việc')):
+        bad = x[(x[col] > cut + pd.Timedelta(days=35)) | (x[col] < pd.Timestamp('2020-01-01'))]
+        for r in bad.itertuples(): add('Cao', 'Ngày bất thường (sai năm?)', 'TUYỂN DỤNG - DATA', 'DATA TUYỂN DỤNG', r.Index + 2, r.TEN, f'Ngày {nm} = {fd(getattr(r, col))}, ngoài khoảng hợp lý (dữ liệu mới nhất {fd(cut)}).', 'Kiểm tra lại năm/tháng gõ nhầm.')
+    for col, nm in (('NGAYPV', 'NGÀY PV'), ('NGAYNV', 'NGÀY NHẬN VIỆC'), ('NGAYLL', 'NGÀY LIÊN LẠC')):
+        t_ = x[x[col].map(lambda v: isinstance(v, str)).astype(bool) & x[col + '_d'].notna()]
+        for r in t_.itertuples(): add('Thấp', 'Ô ngày nhập dạng chữ', 'TUYỂN DỤNG - DATA', 'DATA TUYỂN DỤNG', r.Index + 2, r.TEN, f'Cột {nm} là chữ "{getattr(r, col)}" (app đọc theo ngày/tháng/năm = {fd(getattr(r, col + "_d"))}); công thức Excel sẽ bỏ qua ô này.', 'Nhập lại thành ngày chuẩn (không gõ dạng chữ).')
+    dup = d[_in(d.NGAYLL_d, s, e)]; dup = dup[dup.duplicated(['TEN', 'VITRI', 'NGAYLL_d', 'NGUON'], keep=False)].sort_values('TEN')
+    for k_, g in dup.groupby(['TEN', 'VITRI', 'NGAYLL_d', 'NGUON']): add('Thấp', 'Dòng CV trùng', 'TUYỂN DỤNG - DATA', 'DATA TUYỂN DỤNG', g.index[0] + 2, k_[0], f'{len(g)} dòng giống nhau (vị trí {k_[1]}, liên lạc {fd(k_[2])}, nguồn {k_[3]}) tại các dòng {", ".join(str(i + 2) for i in g.index)}.', 'Xóa dòng thừa nếu là cùng một ứng viên (đang đếm vào số CV).')
+    # ---- 4) lệch chi nhánh / ngày nhận việc giữa các file (người nhận việc trong kỳ)
+    for r in nv.itertuples():
+        for nm, df, skip_vp in (('Master Data', ms, False), ('Kế toán Admin (NHẬN VIỆC)', kn, True)):
+            if skip_vp and r.KHOI == 'Văn Phòng': continue
+            w_ = near(df[df.k == r.k], 'NNV_d', r.NGAYNV_d, 7)
+            if not len(w_): continue
+            c = w_.iloc[0]; row = c.ROW if 'ROW' in c.index else c.name + 2
+            if c.NNV_d != r.NGAYNV_d: add('Trung bình', 'Ngày nhận việc lệch giữa các file', nm, nm, row, r.TEN, f'DATA {fd(r.NGAYNV_d)} ≠ {nm} {fd(c.NNV_d)}.', 'Thống nhất ngày nhận việc.')
+            if r.KHOI != 'Văn Phòng' and norm(c.CN) not in (norm(r.CN),) and not ({norm(c.CN), norm(r.CN)} == {'BINH DUONG', 'BINH DUOG'}): add('Trung bình', 'Chi nhánh lệch giữa các file', nm, nm, row, r.TEN, f'DATA ghi {r.CN} ≠ {nm} ghi {c.CN}.', 'Xác nhận chi nhánh thật (hoặc ghi chú điều chuyển).')
+            if nm == 'Kế toán Admin (NHẬN VIỆC)' and norm(c.CN) == 'BINH DUOG': add('Thấp', 'Sai chính tả tên chi nhánh', nm, nm, row, r.TEN, 'Chi nhánh ghi "Bình Dươg".', 'Sửa thành "Bình Dương".')
+    # ---- 5) Master: trạng thái ↔ ngày nghỉ
+    mt = ms[ms.TT.isin(['Đã nghỉ việc', 'Nghỉ ngang', 'Công ty cho nghỉ']) & ms.NNGHI_d.isna() & (ms.NNV_d >= cut - pd.Timedelta(days=365))]
+    for r in mt.itertuples(): add('Trung bình', 'Master: trạng thái nghỉ nhưng thiếu ngày nghỉ', 'Master Data', '1. TỔNG DATA - NHÂN SỰ', r.Index + 2, r.TEN, f'Trạng thái "{r.TT}", nhận việc {fd(r.NNV_d)} nhưng không có ngày nghỉ hợp lệ ("{r.NNGHI}") → không xếp được vào tuần/tháng nào.', 'Điền ngày nghỉ.')
+    ml = ms[(ms.TT == 'Đang làm việc') & _in(ms.NNGHI_d, s, e)]
+    for r in ml.itertuples(): add('Cao', 'Master: đang làm việc nhưng có ngày nghỉ', 'Master Data', '1. TỔNG DATA - NHÂN SỰ', r.Index + 2, r.TEN, f'Trạng thái "Đang làm việc" nhưng có ngày nghỉ {fd(r.NNGHI_d)}.', 'Cập nhật trạng thái hoặc xóa ngày nghỉ.')
+    # ---- 6) vị trí chưa phân nhóm KTV/TVV
+    for col, nm, df in (('VITRI', 'nhận việc (DATA)', nv), ('CV', 'nghỉ việc', ng)):
+        if len(df):
+            vc = df[col].map(nhom_vi_tri); odd = df[vc == 'Khác'][col].fillna('(trống)').value_counts()
+            for v_, n_ in odd.items(): add('Thấp', 'Vị trí không thuộc KTV / TVV', 'DATA / Kế toán / Master', nm, None, str(v_), f'{n_} người {nm} có vị trí/chức vụ "{v_}" – dashboard xếp vào nhóm "Khác".', 'Bình thường nếu là bảo vệ/tạp vụ/văn phòng; nếu là KTV/TVV thì sửa cách viết.')
+    out = pd.DataFrame(I, columns=['Mức độ', 'Loại', 'File', 'Sheet', 'Dòng', 'Họ tên', 'Chi tiết', 'Gợi ý xử lý'])
+    if len(out):
+        out['_o'] = out['Mức độ'].map(SEV_ORDER); out = out.sort_values(['_o', 'Loại', 'Họ tên']).drop(columns='_o').reset_index(drop=True); out.insert(0, 'STT', range(1, len(out) + 1))
+    else: out.insert(0, 'STT', [])
+    return out
 
 # ------------------------------------------------------------------ PHÂN TÍCH CHUYÊN SÂU (tính từ dòng raw, không gồm điều chỉnh khớp báo cáo)
 def _cv(d, s, e): return d[_in(d.NGAYLL_d, s, e)].copy()
@@ -811,7 +1018,10 @@ def main():
                 names = {k_: v_[0] for k_, v_ in chosen.items()}
             except Exception as ex: st.sidebar.error(f'Không đọc được file đã tải lên: {ex}')
     if raw is None:
-        st.title('Báo cáo tuyển dụng theo tháng'); st.info('Nhập đường dẫn thư mục (hoặc tải 3–4 file raw lên) ở thanh bên để bắt đầu.'); st.stop()
+        st.title('Báo cáo tuyển dụng theo tháng')
+        if mode == 'Tải file lên': st.info('👈 Kéo thả 3–4 file raw vào ô "Kéo thả các file raw" ở thanh bên trái: DATA tuyển dụng, Kế toán Admin Update, Master Data (bắt buộc) và Report Facebook Ads (không bắt buộc). Tên file và thứ tự tùy ý – app tự nhận ra.')
+        else: st.info('👈 Nhập đường dẫn thư mục chứa các file raw ở thanh bên trái, hoặc đổi sang "Tải file lên" để kéo thả file.')
+        st.stop()
 
     years = sorted({int(y) for y in raw['d'].NGAYLL_d.dropna().dt.year.unique() if 2020 <= y <= 2100}) or [2026]
     year = st.sidebar.selectbox('Năm', years, index=len(years) - 1, key='year')
@@ -826,6 +1036,13 @@ def main():
                                   help='Tháng có điều chỉnh: ' + (', '.join(f'{m:02d}/{year}' for m in sorted(k[1] for k in ADJ if k[0] == year)) or 'không có') + '. Tắt để xem số thuần từ raw.')
     if use_adj and has_adj: st.sidebar.caption('Đang áp dụng điều chỉnh cho: ' + ', '.join(f'T{m:02d}' for m in has_adj))
     elif not use_adj: st.sidebar.caption('Đang xem số thuần từ raw (chưa điều chỉnh).')
+    use_range = st.sidebar.checkbox('Xem thêm theo khoảng ngày tùy chọn', value=False, key='use_range', help='Giống dashboard theo dõi: chọn Từ ngày – Đến ngày bất kỳ.')
+    rng = None
+    if use_range:
+        cut_ = raw['cutoff']; d0 = (cut_ - pd.Timedelta(days=cut_.day - 1)).date()
+        v_ = st.sidebar.date_input('Từ ngày – đến ngày', value=(d0, cut_.date()), key='rng')
+        if isinstance(v_, (tuple, list)) and len(v_) == 2 and v_[0] <= v_[1]: rng = (pd.Timestamp(v_[0]), pd.Timestamp(v_[1]))
+        else: st.sidebar.info('Chọn đủ ngày bắt đầu và ngày kết thúc.')
     manual = {}
     with st.sidebar.expander('Chi phí nhập tay (không có trong raw)'):
         for m in sel:
@@ -844,8 +1061,20 @@ def main():
         return st.session_state['res'][key]
     results = [get_result(m) for m in sel]
     def get_deep(R):
-        key = ('deep', id(raw), year, R['month'], R['adjusted'])
+        key = ('deep', id(raw), R['start'], R['end'], R['adjusted'])
         if key not in st.session_state['res']: st.session_state['res'][key] = analyze_deep(raw, R)
+        return st.session_state['res'][key]
+    def get_weekly(m):
+        key = ('weekly', id(raw), year, m)
+        if key not in st.session_state['res']: st.session_state['res'][key] = weekly_summary(raw, year, m)
+        return st.session_state['res'][key]
+    def get_checks(R):
+        key = ('check', id(raw), R['start'], R['end'])
+        if key not in st.session_state['res']: st.session_state['res'][key] = kiem_tra_du_lieu(raw, R['start'], R['end'])
+        return st.session_state['res'][key]
+    def get_period(s_, e_, label, m):
+        key = ('period', id(raw), s_, e_)
+        if key not in st.session_state['res']: st.session_state['res'][key] = compute_month(raw, year, m, None, None, period=(s_, e_), label=label)
         return st.session_state['res'][key]
     def get_trend():
         key = ('trend', id(raw), year)
@@ -857,7 +1086,8 @@ def main():
 
     bt_store = {}
 
-    tabs = st.tabs(['📊 So sánh các tháng', f'📈 Xu hướng năm {year}'] + [MONTHS[m] for m in sel])
+    fixed_tabs = ['📊 So sánh các tháng', f'📈 Xu hướng năm {year}', '📅 Theo tuần', '🔎 Kiểm tra dữ liệu'] + (['🗓 Khoảng ngày'] if rng else [])
+    NF = len(fixed_tabs); tabs = st.tabs(fixed_tabs + [MONTHS[m] for m in sel])
     # ------------------------------------------------------------------ so sánh
     with tabs[0]:
         cmp_ = compare(results)
@@ -887,175 +1117,239 @@ def main():
         l, r_ = st.columns(2)
         with l: st.markdown('**Nhận việc theo nguồn (6 nguồn nhiều nhất)**'); show(TR['src_nv']); st.line_chart(TR['src_nv'].T)
         with r_: st.markdown('**CV theo nguồn (8 nguồn nhiều nhất)**'); show(TR['src_cv']); st.line_chart(TR['src_cv'].T)
-    for tab, R in zip(tabs[2:], results):
-        m = R['month']; T = R['funnel']; c = R['cost']; K = f'm{m}'
-        with tab:
-            st.header(f"{MONTHS[m]}/{R['year']}  ({R['start']:%d/%m} – {R['end']:%d/%m})")
-            if not R['has_data']: st.warning('Không có CV hoặc nhận việc nào trong tháng này – có thể file chưa cập nhật tới tháng này.')
-            elif R['end'] > R['cutoff']: st.info(f"Tháng chưa trọn: dữ liệu mới nhất đến {R['cutoff']:%d/%m/%Y}. Số liệu còn thay đổi.")
-            if R['adjusted']:
-                ad = R['adj']; st.success(f"Đã khớp báo cáo đã duyệt: {ad.get('ten', '')}. Số liệu dưới đây gồm các điều chỉnh liệt kê trong khung bên dưới (tắt ở thanh bên để xem số thuần từ raw).")
-                if R['adj_baseline_diff']:
-                    nm_ = {'CV': 'số CV', 'PV': 'tham gia PV', 'PASS': 'Pass', 'KHONG_DAT': 'không đạt', 'DOI_KQ': 'đợi kết quả', 'KHONG_DEN_PV': 'không đến PV', 'NV': 'nhận việc', 'KHONG_NV': 'không nhận việc', 'NGHI': 'nghỉ việc'}
-                    st.warning('⚠️ File raw hiện tại khác bản raw dùng để lập các điều chỉnh: ' + '; '.join(f'{nm_.get(k_, k_)} = {a_} (lúc lập điều chỉnh: {b_})' for k_, (a_, b_) in R['adj_baseline_diff'].items()) + '. Các điều chỉnh có thể không còn đúng – kiểm tra lại hoặc tắt "Khớp báo cáo đã duyệt".')
-                with st.expander('Xem các điều chỉnh đã áp dụng và lý do'):
-                    for x in ad.get('nhan_viec_bo_sung', []): st.markdown(f"- **Thêm người nhận việc** {x['TEN']} ({x['CN']}, {x['NNV']}): {x['ly_do']}")
-                    for k_, dt_, why in ad.get('loai_tru_nghi', []): st.markdown(f"- **Không tính vào nghỉ việc** {k_.title()} (nhận việc {dt_}): {why}")
-                    ly = ad.get('ly_do_delta', {})
-                    for nm, key in (('Theo nguồn', 'delta_nguon'), ('Theo HR', 'delta_hr'), ('Theo chi nhánh (mọi vị trí)', 'delta_unit'), ('Bảng phòng ban/chi nhánh của báo cáo', 'delta_dept')):
-                        if ad.get(key): st.markdown(f"- **{nm}:** " + '; '.join(f'{g_} – {mm}: {v:+d}' for (g_, mm), v in ad[key].items()) + f"  \n  _{ly.get(key.split('_')[1], '')}_")
-                    st.markdown('- **Nhập tay trong báo cáo:** đầu kỳ, số lượng yêu cầu, chi phí CareerViet/TopCV, Facebook Ads 30–31/10, nhóm lý do nghỉ (phân loại tay).')
-            a = st.columns(6)
-            a[0].metric('Số CV', f"{T['CV']:,}"); a[1].metric('Tham gia PV', f"{T['PV']:,}", fmt_pct(pct(T['PV'], T['CV'])) + ' của CV', delta_color='off')
-            a[2].metric('Pass PV', f"{T['PASS']:,}", fmt_pct(pct(T['PASS'], T['PV'])) + ' của PV', delta_color='off'); a[3].metric('Nhận việc', f"{T['NV']:,}", fmt_pct(pct(T['NV'], T['PASS'])) + ' của Pass', delta_color='off')
-            a[4].metric('Nghỉ việc', f"{R['nghi_total']:,}", fmt_pct(pct(R['nghi_total'], T['NV'])) + ' / nhận việc', delta_color='off'); a[5].metric('Chi phí / người nhận việc', fmt_vnd(c['per_nv']))
+    def render_period(R, K):
+        """Hiển thị đầy đủ một kỳ (tháng, tuần hoặc khoảng ngày bất kỳ)."""
+        T = R['funnel']; c = R['cost']
+        st.header(f"{R['label']}  ({R['start']:%d/%m} – {R['end']:%d/%m})")
+        if not R['has_data']: st.warning('Không có CV hoặc nhận việc nào trong kỳ này – có thể file chưa cập nhật tới kỳ này.')
+        elif R['end'] > R['cutoff']: st.info(f"Kỳ chưa trọn: dữ liệu mới nhất đến {R['cutoff']:%d/%m/%Y}. Số liệu còn thay đổi.")
+        if R['adjusted']:
+            ad = R['adj']; st.success(f"Đã khớp báo cáo đã duyệt: {ad.get('ten', '')}. Số liệu dưới đây gồm các điều chỉnh liệt kê trong khung bên dưới (tắt ở thanh bên để xem số thuần từ raw).")
+            if R['adj_baseline_diff']:
+                nm_ = {'CV': 'số CV', 'PV': 'tham gia PV', 'PASS': 'Pass', 'KHONG_DAT': 'không đạt', 'DOI_KQ': 'đợi kết quả', 'KHONG_DEN_PV': 'không đến PV', 'NV': 'nhận việc', 'KHONG_NV': 'không nhận việc', 'NGHI': 'nghỉ việc'}
+                st.warning('⚠️ File raw hiện tại khác bản raw dùng để lập các điều chỉnh: ' + '; '.join(f'{nm_.get(k_, k_)} = {a_} (lúc lập điều chỉnh: {b_})' for k_, (a_, b_) in R['adj_baseline_diff'].items()) + '. Các điều chỉnh có thể không còn đúng – kiểm tra lại hoặc tắt "Khớp báo cáo đã duyệt".')
+            with st.expander('Xem các điều chỉnh đã áp dụng và lý do'):
+                for x in ad.get('nhan_viec_bo_sung', []): st.markdown(f"- **Thêm người nhận việc** {x['TEN']} ({x['CN']}, {x['NNV']}): {x['ly_do']}")
+                for k_, dt_, why in ad.get('loai_tru_nghi', []): st.markdown(f"- **Không tính vào nghỉ việc** {k_.title()} (nhận việc {dt_}): {why}")
+                ly = ad.get('ly_do_delta', {})
+                for nm, key in (('Theo nguồn', 'delta_nguon'), ('Theo HR', 'delta_hr'), ('Theo chi nhánh (mọi vị trí)', 'delta_unit'), ('Bảng phòng ban/chi nhánh của báo cáo', 'delta_dept')):
+                    if ad.get(key): st.markdown(f"- **{nm}:** " + '; '.join(f'{g_} – {mm}: {v:+d}' for (g_, mm), v in ad[key].items()) + f"  \n  _{ly.get(key.split('_')[1], '')}_")
+                st.markdown('- **Nhập tay trong báo cáo:** đầu kỳ, số lượng yêu cầu, chi phí CareerViet/TopCV, Facebook Ads 30–31/10, nhóm lý do nghỉ (phân loại tay).')
+        a = st.columns(6)
+        a[0].metric('Số CV', f"{T['CV']:,}"); a[1].metric('Tham gia PV', f"{T['PV']:,}", fmt_pct(pct(T['PV'], T['CV'])) + ' của CV', delta_color='off')
+        a[2].metric('Pass PV', f"{T['PASS']:,}", fmt_pct(pct(T['PASS'], T['PV'])) + ' của PV', delta_color='off'); a[3].metric('Nhận việc', f"{T['NV']:,}", fmt_pct(pct(T['NV'], T['PASS'])) + ' của Pass', delta_color='off')
+        a[4].metric('Nghỉ việc', f"{R['nghi_total']:,}", fmt_pct(pct(R['nghi_total'], T['NV'])) + ' / nhận việc', delta_color='off'); a[5].metric('Chi phí / người nhận việc', fmt_vnd(c['per_nv']))
 
-            Dp = get_deep(R); ins = insights(R, Dp)
-            if ins:
-                st.subheader('Điểm nổi bật')
-                for line in ins: st.markdown('- ' + line)
-            st.subheader('1. Phễu tuyển dụng')
-            fun = pd.DataFrame({'Bước': ['CV (liên lạc)', 'Tham gia PV', 'Đạt PV', 'Nhận việc'], 'Số lượng': [T['CV'], T['PV'], T['PASS'], T['NV']]})
-            fun['% so với bước trước'] = [np.nan] + [pct(fun['Số lượng'][i], fun['Số lượng'][i - 1]) for i in range(1, 4)]; fun['% so với CV'] = [pct(x, T['CV']) for x in fun['Số lượng']]
-            fun = fun.rename(columns={'% so với bước trước': '%so với bước trước', '% so với CV': '%so với CV'})
-            l, r_ = st.columns([3, 2])
-            with l: show(fun.set_index('Bước'))
-            with r_: st.bar_chart(fun.set_index('Bước')['Số lượng'])
-            st.caption(f"Không đạt PV {T['KHONG_DAT']:,} ({fmt_pct(pct(T['KHONG_DAT'], T['PV']))} của PV) · Không đến PV {T['KHONG_DEN_PV']:,} ({fmt_pct(pct(T['KHONG_DEN_PV'], T['PV'] + T['KHONG_DEN_PV']))} số hẹn) · Đợi kết quả {T['DOI_KQ']:,} · Không nhận việc {T['KHONG_NV']:,} ({fmt_pct(pct(T['KHONG_NV'], T['NV'] + T['KHONG_NV']))} trên số được mời nhận việc).")
+        Dp = get_deep(R); ins = insights(R, Dp)
+        if ins:
+            st.subheader('Điểm nổi bật')
+            for line in ins: st.markdown('- ' + line)
+        st.subheader('1. Phễu tuyển dụng')
+        fun = pd.DataFrame({'Bước': ['CV (liên lạc)', 'Tham gia PV', 'Đạt PV', 'Nhận việc'], 'Số lượng': [T['CV'], T['PV'], T['PASS'], T['NV']]})
+        fun['% so với bước trước'] = [np.nan] + [pct(fun['Số lượng'][i], fun['Số lượng'][i - 1]) for i in range(1, 4)]; fun['% so với CV'] = [pct(x, T['CV']) for x in fun['Số lượng']]
+        fun = fun.rename(columns={'% so với bước trước': '%so với bước trước', '% so với CV': '%so với CV'})
+        l, r_ = st.columns([3, 2])
+        with l: show(fun.set_index('Bước'))
+        with r_: st.bar_chart(fun.set_index('Bước')['Số lượng'])
+        st.caption(f"Không đạt PV {T['KHONG_DAT']:,} ({fmt_pct(pct(T['KHONG_DAT'], T['PV']))} của PV) · Không đến PV {T['KHONG_DEN_PV']:,} ({fmt_pct(pct(T['KHONG_DEN_PV'], T['PV'] + T['KHONG_DEN_PV']))} số hẹn) · Đợi kết quả {T['DOI_KQ']:,} · Không nhận việc {T['KHONG_NV']:,} ({fmt_pct(pct(T['KHONG_NV'], T['NV'] + T['KHONG_NV']))} trên số được mời nhận việc).")
 
-            def block(title, df, key, extra=''):
-                st.subheader(title); 
-                view = st.radio('Cách tính', ['Theo kỳ (như báo cáo tháng)', 'Theo đợt CV của tháng (cohort)'], horizontal=True, key=f'{K}_{key}_view')
-                if view.startswith('Theo kỳ'): cols = ['CV', 'PV', 'PASS', 'NV', 'KHONG_NV', '%PV/CV', '%Pass/PV', '%NV/Pass', '%NV/CV', '%Không đến PV', '%Tỷ trọng CV', '%Tỷ trọng NV']
-                else: cols = ['CV_DOT', 'DOT_PV', 'DOT_PASS', 'DOT_NV', '%Đợt CV→PV', '%Đợt CV→Pass', '%Đợt CV→NV']
-                show(df[cols]); 
-                if extra: st.caption(extra)
-                top = df.head(12)[['CV', 'PASS', 'NV']] if view.startswith('Theo kỳ') else df.head(12)[['CV_DOT', 'DOT_PASS', 'DOT_NV']]
-                st.bar_chart(top)
-            st.markdown('---')
-            block('2. Theo nguồn CV', R['by_source'], 'src', '"Theo kỳ": mỗi bước tính theo ngày của chính bước đó nên % có thể vượt 100%. "Theo đợt CV": chỉ xét những người liên lạc trong tháng – tỷ lệ luôn ≤100%. Nguồn có ít CV chỉ mang tính tham khảo.')
-            block('3. Theo nhân sự tuyển dụng (HR)', R['by_hr'], 'hr')
-            block('4. Theo chi nhánh / phòng ban', R['by_unit'], 'unit', 'Tính theo cột Chi nhánh trong DATA, gồm mọi vị trí (báo cáo tháng 10 chỉ lọc một số vị trí nên số có thể lớn hơn).')
-            st.subheader('4b. Theo khối'); show(R['by_khoi'][['CV', 'PV', 'PASS', 'NV', '%PV/CV', '%Pass/PV', '%NV/Pass', '%NV/CV']])
-            st.subheader('5. Theo vị trí tuyển (top 15 theo CV)'); show(R['by_pos'].sort_values('CV', ascending=False).head(15)[['CV', 'PV', 'PASS', 'NV', '%PV/CV', '%Pass/PV', '%NV/Pass', '%NV/CV']])
+        def block(title, df, key, extra=''):
+            st.subheader(title); 
+            view = st.radio('Cách tính', ['Theo kỳ (như báo cáo tháng)', 'Theo đợt CV của tháng (cohort)'], horizontal=True, key=f'{K}_{key}_view')
+            if view.startswith('Theo kỳ'): cols = ['CV', 'PV', 'PASS', 'NV', 'KHONG_NV', '%PV/CV', '%Pass/PV', '%NV/Pass', '%NV/CV', '%Không đến PV', '%Tỷ trọng CV', '%Tỷ trọng NV']
+            else: cols = ['CV_DOT', 'DOT_PV', 'DOT_PASS', 'DOT_NV', '%Đợt CV→PV', '%Đợt CV→Pass', '%Đợt CV→NV']
+            show(df[cols]); 
+            if extra: st.caption(extra)
+            top = df.head(12)[['CV', 'PASS', 'NV']] if view.startswith('Theo kỳ') else df.head(12)[['CV_DOT', 'DOT_PASS', 'DOT_NV']]
+            st.bar_chart(top)
+        st.markdown('---')
+        block('2. Theo nguồn CV', R['by_source'], 'src', '"Theo kỳ": mỗi bước tính theo ngày của chính bước đó nên % có thể vượt 100%. "Theo đợt CV": chỉ xét những người liên lạc trong tháng – tỷ lệ luôn ≤100%. Nguồn có ít CV chỉ mang tính tham khảo.')
+        block('3. Theo nhân sự tuyển dụng (HR)', R['by_hr'], 'hr')
+        block('4. Theo chi nhánh / phòng ban', R['by_unit'], 'unit', 'Tính theo cột Chi nhánh trong DATA, gồm mọi vị trí (báo cáo tháng 10 chỉ lọc một số vị trí nên số có thể lớn hơn).')
+        st.subheader('4b. Theo khối'); show(R['by_khoi'][['CV', 'PV', 'PASS', 'NV', '%PV/CV', '%Pass/PV', '%NV/Pass', '%NV/CV']])
+        st.subheader('5. Theo vị trí tuyển (top 15 theo CV)'); show(R['by_pos'].sort_values('CV', ascending=False).head(15)[['CV', 'PV', 'PASS', 'NV', '%PV/CV', '%Pass/PV', '%NV/Pass', '%NV/CV']])
 
-            st.markdown('---'); st.subheader('5b. Biến động nhân sự theo chi nhánh (bố cục báo cáo)')
-            A_ = R['adj'] if R['adjusted'] else {}
-            dk0 = pd.DataFrame({'Đầu kỳ': [A_.get('dau_ky', {}).get(b_) for b_ in BRANCHES], 'SL yêu cầu': [A_.get('sl_yc', {}).get(b_) for b_ in BRANCHES]}, index=BRANCHES, dtype='float')
-            st.caption('Đầu kỳ và Số lượng yêu cầu không có trong raw – nhập vào bảng (tháng 10 đã điền sẵn theo báo cáo).')
-            ed = st.data_editor(dk0, key=f'{K}_dk_{int(R["adjusted"])}', width='stretch')
-            bt = branch_table(R, {k_: v_ for k_, v_ in ed['Đầu kỳ'].items() if v_ == v_}, {k_: v_ for k_, v_ in ed['SL yêu cầu'].items() if v_ == v_}); bt_store[m] = bt; show(bt)
-            st.subheader('5c. Bảng phòng ban / chi nhánh – đúng định nghĩa báo cáo')
-            dr = R['dept_report']
-            if len(dr):
-                dd = dr.copy(); dd.loc['% Tham gia PV / CV'] = [pct(a_, b_) for a_, b_ in zip(dr.loc['Tham gia PV'], dr.loc['Số CV'])]; dd.loc['% Đạt PV / Tham gia PV'] = [pct(a_, b_) for a_, b_ in zip(dr.loc['Đạt PV'], dr.loc['Tham gia PV'])]; dd.loc['% Đã NV / Đạt PV'] = [pct(a_, b_) for a_, b_ in zip(dr.loc['Đã NV'], dr.loc['Đạt PV'])]
-                st.dataframe(dd.style.format('{:,.0f}', subset=pd.IndexSlice[DEPT_METRICS, :]).format('{:.1f}%', na_rep='–', subset=pd.IndexSlice[['% Tham gia PV / CV', '% Đạt PV / Tham gia PV', '% Đã NV / Đạt PV'], :]), width='stretch')
-                st.caption('Chỉ tính các (chi nhánh, vị trí) có trong danh sách ở sheet BC-2026 của file TUYỂN DỤNG - DATA, như báo cáo.')
-            else: st.caption('Không đọc được danh sách vị trí (sheet BC-2026) trong file DATA.')
-            st.subheader('5d. Người hết thử việc trong tháng (còn làm việc)')
-            dtv = R['dat_thu_viec']; q_ = st.columns(len(dtv)); 
-            for c_, (k_, v_) in zip(q_, dtv.items()): c_.metric(k_.title() if k_ != 'TỔNG' else 'Tổng', int(v_))
-            st.caption('Theo ngày cuối thử việc trong Master, trạng thái "Đang làm việc".')
+        st.markdown('---'); st.subheader('5b. Biến động nhân sự theo chi nhánh (bố cục báo cáo)')
+        A_ = R['adj'] if R['adjusted'] else {}
+        dk0 = pd.DataFrame({'Đầu kỳ': [A_.get('dau_ky', {}).get(b_) for b_ in BRANCHES], 'SL yêu cầu': [A_.get('sl_yc', {}).get(b_) for b_ in BRANCHES]}, index=BRANCHES, dtype='float')
+        st.caption('Đầu kỳ và Số lượng yêu cầu không có trong raw – nhập vào bảng (tháng 10 đã điền sẵn theo báo cáo).')
+        ed = st.data_editor(dk0, key=f'{K}_dk_{int(R["adjusted"])}', width='stretch')
+        bt = branch_table(R, {k_: v_ for k_, v_ in ed['Đầu kỳ'].items() if v_ == v_}, {k_: v_ for k_, v_ in ed['SL yêu cầu'].items() if v_ == v_}); (bt_store.__setitem__(R['month'], bt) if R['is_month'] else None); show(bt)
+        st.subheader('5c. Bảng phòng ban / chi nhánh – đúng định nghĩa báo cáo')
+        dr = R['dept_report']
+        if len(dr):
+            dd = dr.copy(); dd.loc['% Tham gia PV / CV'] = [pct(a_, b_) for a_, b_ in zip(dr.loc['Tham gia PV'], dr.loc['Số CV'])]; dd.loc['% Đạt PV / Tham gia PV'] = [pct(a_, b_) for a_, b_ in zip(dr.loc['Đạt PV'], dr.loc['Tham gia PV'])]; dd.loc['% Đã NV / Đạt PV'] = [pct(a_, b_) for a_, b_ in zip(dr.loc['Đã NV'], dr.loc['Đạt PV'])]
+            st.dataframe(dd.style.format('{:,.0f}', subset=pd.IndexSlice[DEPT_METRICS, :]).format('{:.1f}%', na_rep='–', subset=pd.IndexSlice[['% Tham gia PV / CV', '% Đạt PV / Tham gia PV', '% Đã NV / Đạt PV'], :]), width='stretch')
+            st.caption('Chỉ tính các (chi nhánh, vị trí) có trong danh sách ở sheet BC-2026 của file TUYỂN DỤNG - DATA, như báo cáo.')
+        else: st.caption('Không đọc được danh sách vị trí (sheet BC-2026) trong file DATA.')
+        st.subheader('5d. Người hết thử việc trong tháng (còn làm việc)')
+        dtv = R['dat_thu_viec']; q_ = st.columns(len(dtv)); 
+        for c_, (k_, v_) in zip(q_, dtv.items()): c_.metric(k_.title() if k_ != 'TỔNG' else 'Tổng', int(v_))
+        st.caption('Theo ngày cuối thử việc trong Master, trạng thái "Đang làm việc".')
 
-            st.markdown('---'); st.subheader('6. Người nhận việc có giữ được không?')
-            rt = R['retention']
-            b = st.columns(4); b[0].metric('Nhận việc trong tháng', rt['n']); b[1].metric('Đã nghỉ (tính đến nay)', rt['nghi_all'], fmt_pct(pct(rt['nghi_all'], rt['n'])), delta_color='off')
-            b[2].metric('Nghỉ trong 30 ngày', rt['nghi30'], fmt_pct(pct(rt['nghi30'], rt['n'])), delta_color='off'); b[3].metric('Nghỉ trong 60 ngày', rt['nghi60'], fmt_pct(pct(rt['nghi60'], rt['n'])), delta_color='off')
-            if not rt['du_30']: st.warning(f"Chưa đủ 30 ngày sau cuối tháng (dữ liệu đến {R['cutoff']:%d/%m/%Y}) → tỷ lệ nghỉ trong 30 ngày còn thấp hơn thực tế.")
-            show(R['retention_src'].set_index('NGUON')[['NV', 'NGHI', 'NGHI30', '%Đã nghỉ', '%Nghỉ ≤30 ngày']] if len(R['retention_src']) else R['retention_src'])
-            st.caption('Một người được coi là đã nghỉ khi có trong danh sách nghỉ việc (Kế toán/Master) với cùng họ tên và ngày nhận việc lệch ≤7 ngày. Người chưa nhập vào các file nghỉ việc sẽ bị tính là còn làm.')
+        st.markdown('---'); st.subheader('6. Người nhận việc có giữ được không?')
+        rt = R['retention']
+        b = st.columns(4); b[0].metric('Nhận việc trong tháng', rt['n']); b[1].metric('Đã nghỉ (tính đến nay)', rt['nghi_all'], fmt_pct(pct(rt['nghi_all'], rt['n'])), delta_color='off')
+        b[2].metric('Nghỉ trong 30 ngày', rt['nghi30'], fmt_pct(pct(rt['nghi30'], rt['n'])), delta_color='off'); b[3].metric('Nghỉ trong 60 ngày', rt['nghi60'], fmt_pct(pct(rt['nghi60'], rt['n'])), delta_color='off')
+        if not rt['du_30']: st.warning(f"Chưa đủ 30 ngày sau cuối tháng (dữ liệu đến {R['cutoff']:%d/%m/%Y}) → tỷ lệ nghỉ trong 30 ngày còn thấp hơn thực tế.")
+        show(R['retention_src'].set_index('NGUON')[['NV', 'NGHI', 'NGHI30', '%Đã nghỉ', '%Nghỉ ≤30 ngày']] if len(R['retention_src']) else R['retention_src'])
+        st.caption('Một người được coi là đã nghỉ khi có trong danh sách nghỉ việc (Kế toán/Master) với cùng họ tên và ngày nhận việc lệch ≤7 ngày. Người chưa nhập vào các file nghỉ việc sẽ bị tính là còn làm.')
 
-            st.markdown('---'); st.subheader('7. Nghỉ việc')
-            n = R['nghi_total']
-            d_ = st.columns(4); d_[0].metric('Nghỉ việc', n); d_[1].metric('Nghỉ thử việc (<30 ngày)', R['nghi_tv'], fmt_pct(pct(R['nghi_tv'], n)), delta_color='off')
-            d_[2].metric('Nghỉ ≤10 ngày', R['nghi_early10'], fmt_pct(pct(R['nghi_early10'], n)), delta_color='off'); d_[3].metric('Vào và nghỉ trong cùng tháng', R['nghi_moi'], fmt_pct(pct(R['nghi_moi'], n)), delta_color='off')
-            if n:
+        st.markdown('---'); st.subheader('7. Nghỉ việc')
+        n = R['nghi_total']
+        d_ = st.columns(4); d_[0].metric('Nghỉ việc', n); d_[1].metric('Nghỉ thử việc (<30 ngày)', R['nghi_tv'], fmt_pct(pct(R['nghi_tv'], n)), delta_color='off')
+        d_[2].metric('Nghỉ ≤10 ngày', R['nghi_early10'], fmt_pct(pct(R['nghi_early10'], n)), delta_color='off'); d_[3].metric('Vào và nghỉ trong cùng tháng', R['nghi_moi'], fmt_pct(pct(R['nghi_moi'], n)), delta_color='off')
+        if n:
+            l, r_ = st.columns(2)
+            with l: st.markdown('**Thời gian làm việc trước khi nghỉ**'); show(R['tenure']); st.bar_chart(R['tenure']['So_nguoi'])
+            with r_: st.markdown('**Theo chi nhánh / bộ phận**'); show(R['nghi_unit'])
+            l, r_ = st.columns(2)
+            with l: st.markdown('**Theo chức vụ (top 15)**'); show(R['nghi_pos'].head(15))
+            with r_: st.markdown('**Theo nguồn của người nghỉ**'); show(R['nghi_src'])
+            st.markdown('**Nhóm lý do nghỉ**'); show(R['nghi_reason'])
+            st.caption('Nhóm lý do do người làm báo cáo phân loại tay (12 nhóm, cộng 71 trong khi tổng nghỉ việc ghi 70 – đúng như báo cáo).' if R['reason_manual'] else 'Nhóm lý do được gán tự động theo từ khóa trong chữ Admin/Master nhập, chỉ để tham khảo.')
+            if len(R['nghi_excluded']): st.warning(f"{len(R['nghi_excluded'])} người có ngày nghỉ trong tháng ở Kế toán/Master nhưng báo cáo không liệt kê nên không tính: " + '; '.join(R['nghi_excluded'].TEN) + '. Cần xác minh.')
+        else: st.caption('Không có ai nghỉ việc trong tháng này theo Kế toán/Master.')
+
+        st.markdown('---'); st.subheader('8. Chi phí tuyển dụng')
+        e = st.columns(5); e[0].metric('Facebook Ads', fmt_vnd(c['fb'])); e[1].metric('Nhập tay (CareerViet/TopCV/khác)', fmt_vnd(sum(c['manual'].values()))); e[2].metric('Tổng chi phí', fmt_vnd(c['total'])); e[3].metric('Chi phí / CV', fmt_vnd(c['per_cv'])); e[4].metric('Chi phí / Pass', fmt_vnd(c['per_pass']))
+        if c['ads_days'] == 0: st.caption('File Facebook Ads không có số liệu của tháng này (hoặc chưa tải lên).')
+        else:
+            st.caption(f"Facebook Ads có {c['ads_days']}/{c['days_in_month']} ngày trong tháng; {c['msg']:,.0f} lượt nhắn tin; chi phí/lượt nhắn tin {fmt_vnd(c['cpm'])}.")
+            ad = R['ads_daily'].set_index('ngay'); st.bar_chart(ad['spend'])
+        if c['total'] == 0: st.caption('Nhập chi phí CareerViet/TopCV ở thanh bên để tính chi phí trên mỗi CV / người nhận việc.')
+
+        st.markdown('---'); st.subheader('9. Độ đầy đủ dữ liệu giữa các file')
+        cv_ = R['coverage']
+        cov = pd.DataFrame({'Chỉ tiêu': ['Người nhận việc (DATA tuyển dụng)', '  – có trong Master Data', '  – có trong Kế toán (NHẬN VIỆC, chi nhánh)', 'Số dòng nhận việc tháng trong Master', 'Số dòng nhận việc tháng trong Kế toán', 'Người nghỉ việc (hợp 3 nguồn)', '  – có trong Master', '  – có trong CHECK LIST', '  – có trong sheet NGHỈ VIỆC'],
+                            'Số lượng': [cv_['nv_data'], cv_['nv_in_master'], cv_['nv_in_kt'], cv_['master_nv_month'], cv_['kt_nv_month'], cv_['nghi_n'], cv_['nghi_in_master'], cv_['nghi_in_ck'], cv_['nghi_in_kq']]})
+        cov['%'] = [np.nan, pct(cv_['nv_in_master'], cv_['nv_data']), pct(cv_['nv_in_kt'], cv_['nv_data']), np.nan, np.nan, np.nan, pct(cv_['nghi_in_master'], cv_['nghi_n']), pct(cv_['nghi_in_ck'], cv_['nghi_n']), pct(cv_['nghi_in_kq'], cv_['nghi_n'])]
+        show(cov.set_index('Chỉ tiêu'))
+        dq = raw['dq']; msgs = []
+        if R['dup_cv']: msgs.append(f"{R['dup_cv']} dòng CV trùng (cùng tên, vị trí, ngày liên lạc, nguồn) – vẫn được đếm như báo cáo.")
+        txtn = dq['text_NGAYPV'] + dq['text_NGAYNV'] + dq['text_NGAYLL'] + dq['text_NGAYNGHI']
+        if txtn: msgs.append(f"{txtn} ô ngày trong DATA nhập dạng chữ (vd \"03/04/2026\"); app đọc theo ngày/tháng/năm, còn công thức Excel của báo cáo bỏ qua các ô này.")
+        if dq['master_nghi_khong_ngay']: msgs.append(f"Master có {dq['master_nghi_khong_ngay']} người trạng thái đã nghỉ nhưng không có ngày nghỉ hợp lệ nên không xếp được vào tháng nào.")
+        if dq['data_thieu_ngay_lien_lac']: msgs.append(f"DATA có {dq['data_thieu_ngay_lien_lac']} dòng thiếu ngày liên lạc nên không được tính vào CV tháng nào.")
+        if cv_['nghi_lech_ngay']: msgs.append(f"{cv_['nghi_lech_ngay']} người nghỉ có ngày nghỉ khác nhau giữa các file (trong đó {cv_['nghi_lech_thang']} người lệch sang tháng khác ở file kia). App lấy ngày theo thứ tự ưu tiên Master → CHECK LIST → sheet NGHỈ VIỆC của Kế toán.")
+        for t_ in msgs: st.caption('⚠️ ' + t_)
+        st.markdown('---'); st.subheader('10. Phân tích chuyên sâu')
+        st.caption('Tính từ dòng raw của tháng (không gồm điều chỉnh khớp báo cáo) nên có thể lệch vài đơn vị so với các bảng ở trên khi đang bật "Khớp báo cáo".')
+        t1, t2, t3, t4, t5, t6 = st.tabs(['Sàng lọc CV', 'Thời gian tuyển', 'Người phỏng vấn', 'Nguồn × chi nhánh / vị trí', 'Lương đề nghị', 'Giữ chân chi tiết'])
+        with t1:
+            if len(Dp['screen']):
+                st.markdown('**Kết quả đánh giá CV và đi tiếp tới PV / Pass / nhận việc (đợt CV của tháng)**'); show(Dp['screen'])
+                st.markdown('**Theo nguồn**'); show(Dp['screen_src'][['CV', 'DA_DANH_GIA', 'PHU_HOP', 'LUU', 'KHONG_PHU_HOP', '% Phù hợp', '% Lưu', '% Không phù hợp', '% Phù hợp đi tới PV', '% Phù hợp nhận việc']])
+                st.markdown('**Theo HR**'); show(Dp['screen_hr'][['CV', 'DA_DANH_GIA', 'PHU_HOP', 'LUU', 'KHONG_PHU_HOP', '% Phù hợp', '% Lưu', '% Không phù hợp', '% Phù hợp đi tới PV', '% Phù hợp nhận việc']])
+                st.caption('Dựa vào cột ĐÁNH GIÁ trong DATA (Phù hợp / Lưu / Không phù hợp). CV chưa đánh giá được tách riêng.')
+            else: st.caption('Không có CV trong tháng.')
+        with t2:
+            lt = Dp['lead']
+            if lt['n']:
+                st.markdown(f"**Thời gian tuyển của {lt['n']} người nhận việc trong tháng (ngày)**"); show(lt['stats'])
+                st.caption('"Ngày sai thứ tự" = ngày PV sớm hơn ngày liên lạc (nhập liệu sai); các dòng này bị loại khỏi trung bình/trung vị.')
                 l, r_ = st.columns(2)
-                with l: st.markdown('**Thời gian làm việc trước khi nghỉ**'); show(R['tenure']); st.bar_chart(R['tenure']['So_nguoi'])
-                with r_: st.markdown('**Theo chi nhánh / bộ phận**'); show(R['nghi_unit'])
-                l, r_ = st.columns(2)
-                with l: st.markdown('**Theo chức vụ (top 15)**'); show(R['nghi_pos'].head(15))
-                with r_: st.markdown('**Theo nguồn của người nghỉ**'); show(R['nghi_src'])
-                st.markdown('**Nhóm lý do nghỉ**'); show(R['nghi_reason'])
-                st.caption('Nhóm lý do do người làm báo cáo phân loại tay (12 nhóm, cộng 71 trong khi tổng nghỉ việc ghi 70 – đúng như báo cáo).' if R['reason_manual'] else 'Nhóm lý do được gán tự động theo từ khóa trong chữ Admin/Master nhập, chỉ để tham khảo.')
-                if len(R['nghi_excluded']): st.warning(f"{len(R['nghi_excluded'])} người có ngày nghỉ trong tháng ở Kế toán/Master nhưng báo cáo không liệt kê nên không tính: " + '; '.join(R['nghi_excluded'].TEN) + '. Cần xác minh.')
-            else: st.caption('Không có ai nghỉ việc trong tháng này theo Kế toán/Master.')
-
-            st.markdown('---'); st.subheader('8. Chi phí tuyển dụng')
-            e = st.columns(5); e[0].metric('Facebook Ads', fmt_vnd(c['fb'])); e[1].metric('Nhập tay (CareerViet/TopCV/khác)', fmt_vnd(sum(c['manual'].values()))); e[2].metric('Tổng chi phí', fmt_vnd(c['total'])); e[3].metric('Chi phí / CV', fmt_vnd(c['per_cv'])); e[4].metric('Chi phí / Pass', fmt_vnd(c['per_pass']))
-            if c['ads_days'] == 0: st.caption('File Facebook Ads không có số liệu của tháng này (hoặc chưa tải lên).')
-            else:
-                st.caption(f"Facebook Ads có {c['ads_days']}/{c['days_in_month']} ngày trong tháng; {c['msg']:,.0f} lượt nhắn tin; chi phí/lượt nhắn tin {fmt_vnd(c['cpm'])}.")
-                ad = R['ads_daily'].set_index('ngay'); st.bar_chart(ad['spend'])
-            if c['total'] == 0: st.caption('Nhập chi phí CareerViet/TopCV ở thanh bên để tính chi phí trên mỗi CV / người nhận việc.')
-
-            st.markdown('---'); st.subheader('9. Độ đầy đủ dữ liệu giữa các file')
-            cv_ = R['coverage']
-            cov = pd.DataFrame({'Chỉ tiêu': ['Người nhận việc (DATA tuyển dụng)', '  – có trong Master Data', '  – có trong Kế toán (NHẬN VIỆC, chi nhánh)', 'Số dòng nhận việc tháng trong Master', 'Số dòng nhận việc tháng trong Kế toán', 'Người nghỉ việc (hợp 3 nguồn)', '  – có trong Master', '  – có trong CHECK LIST', '  – có trong sheet NGHỈ VIỆC'],
-                                'Số lượng': [cv_['nv_data'], cv_['nv_in_master'], cv_['nv_in_kt'], cv_['master_nv_month'], cv_['kt_nv_month'], cv_['nghi_n'], cv_['nghi_in_master'], cv_['nghi_in_ck'], cv_['nghi_in_kq']]})
-            cov['%'] = [np.nan, pct(cv_['nv_in_master'], cv_['nv_data']), pct(cv_['nv_in_kt'], cv_['nv_data']), np.nan, np.nan, np.nan, pct(cv_['nghi_in_master'], cv_['nghi_n']), pct(cv_['nghi_in_ck'], cv_['nghi_n']), pct(cv_['nghi_in_kq'], cv_['nghi_n'])]
-            show(cov.set_index('Chỉ tiêu'))
-            dq = raw['dq']; msgs = []
-            if R['dup_cv']: msgs.append(f"{R['dup_cv']} dòng CV trùng (cùng tên, vị trí, ngày liên lạc, nguồn) – vẫn được đếm như báo cáo.")
-            txtn = dq['text_NGAYPV'] + dq['text_NGAYNV'] + dq['text_NGAYLL'] + dq['text_NGAYNGHI']
-            if txtn: msgs.append(f"{txtn} ô ngày trong DATA nhập dạng chữ (vd \"03/04/2026\"); app đọc theo ngày/tháng/năm, còn công thức Excel của báo cáo bỏ qua các ô này.")
-            if dq['master_nghi_khong_ngay']: msgs.append(f"Master có {dq['master_nghi_khong_ngay']} người trạng thái đã nghỉ nhưng không có ngày nghỉ hợp lệ nên không xếp được vào tháng nào.")
-            if dq['data_thieu_ngay_lien_lac']: msgs.append(f"DATA có {dq['data_thieu_ngay_lien_lac']} dòng thiếu ngày liên lạc nên không được tính vào CV tháng nào.")
-            if cv_['nghi_lech_ngay']: msgs.append(f"{cv_['nghi_lech_ngay']} người nghỉ có ngày nghỉ khác nhau giữa các file (trong đó {cv_['nghi_lech_thang']} người lệch sang tháng khác ở file kia). App lấy ngày theo thứ tự ưu tiên Master → CHECK LIST → sheet NGHỈ VIỆC của Kế toán.")
-            for t_ in msgs: st.caption('⚠️ ' + t_)
-            st.markdown('---'); st.subheader('10. Phân tích chuyên sâu')
-            st.caption('Tính từ dòng raw của tháng (không gồm điều chỉnh khớp báo cáo) nên có thể lệch vài đơn vị so với các bảng ở trên khi đang bật "Khớp báo cáo".')
-            t1, t2, t3, t4, t5, t6 = st.tabs(['Sàng lọc CV', 'Thời gian tuyển', 'Người phỏng vấn', 'Nguồn × chi nhánh / vị trí', 'Lương đề nghị', 'Giữ chân chi tiết'])
-            with t1:
-                if len(Dp['screen']):
-                    st.markdown('**Kết quả đánh giá CV và đi tiếp tới PV / Pass / nhận việc (đợt CV của tháng)**'); show(Dp['screen'])
-                    st.markdown('**Theo nguồn**'); show(Dp['screen_src'][['CV', 'DA_DANH_GIA', 'PHU_HOP', 'LUU', 'KHONG_PHU_HOP', '% Phù hợp', '% Lưu', '% Không phù hợp', '% Phù hợp đi tới PV', '% Phù hợp nhận việc']])
-                    st.markdown('**Theo HR**'); show(Dp['screen_hr'][['CV', 'DA_DANH_GIA', 'PHU_HOP', 'LUU', 'KHONG_PHU_HOP', '% Phù hợp', '% Lưu', '% Không phù hợp', '% Phù hợp đi tới PV', '% Phù hợp nhận việc']])
-                    st.caption('Dựa vào cột ĐÁNH GIÁ trong DATA (Phù hợp / Lưu / Không phù hợp). CV chưa đánh giá được tách riêng.')
-                else: st.caption('Không có CV trong tháng.')
-            with t2:
-                lt = Dp['lead']
-                if lt['n']:
-                    st.markdown(f"**Thời gian tuyển của {lt['n']} người nhận việc trong tháng (ngày)**"); show(lt['stats'])
-                    st.caption('"Ngày sai thứ tự" = ngày PV sớm hơn ngày liên lạc (nhập liệu sai); các dòng này bị loại khỏi trung bình/trung vị.')
-                    l, r_ = st.columns(2)
-                    with l: st.markdown('**Phân bố: liên lạc → nhận việc**'); show(lt['dist']); st.bar_chart(lt['dist']['So_nguoi'])
-                    with r_: st.markdown('**Theo nguồn**'); show(lt['by_source'])
-                    st.markdown('**Theo vị trí (top 15)**'); show(lt['by_pos'])
-                else: st.caption('Không có người nhận việc trong tháng.')
-            with t3:
-                if len(Dp['interv']):
-                    show(Dp['interv']); st.caption('Gom các cách viết tên khác nhau của cùng một người (A Pháp / a Pháp / Pháp) – chỉ mang tính tham khảo. "Nhận việc / Pass" tính trên những người đã Pass trong tháng.')
-                else: st.caption('Không có buổi phỏng vấn trong tháng.')
-            with t4:
-                for ttl, key in (('Nguồn × chi nhánh/bộ phận', 'x_src_unit'), ('Nguồn × vị trí', 'x_src_pos')):
-                    xm = Dp[key]
-                    if xm is None: st.caption('Không có dữ liệu.'); continue
-                    st.markdown(f'**{ttl}** (đợt CV của tháng)')
-                    sel_ = st.radio('Hiển thị', ['% nhận việc / CV', 'Số CV', 'Số nhận việc'], horizontal=True, key=f'{K}_{key}')
-                    if sel_.startswith('%'): st.dataframe(xm['rate'].style.format('{:.1f}%', na_rep='–'), width='stretch')
-                    else: show(xm['cv'] if sel_ == 'Số CV' else xm['nv'])
-                st.caption('Ô trống (–) = không có CV. Ô có ít CV cho tỷ lệ dao động mạnh, xem cùng bảng "Số CV".')
-            with t5:
-                sal = Dp['salary']
-                if sal.get('n'):
-                    st.markdown(f"Có {sal['n']} / {sal['cv']} CV ghi mức lương đề nghị ({sal['cover']:.1f}%). Trung vị {sal['overall']['median']:.1f} triệu, trung bình {sal['overall']['mean']:.1f} triệu.")
-                    show(sal['table']); st.caption('Chỉ những CV có ghi lương mới được tính (thường là đã chốt/đề xuất lương) nên "% nhận việc" ở đây cao hơn mặt bằng chung.')
-                else: st.caption('Không có CV nào ghi mức lương trong tháng.')
-            with t6:
-                rd = Dp['ret']; st.markdown('**Đường cong giữ chân của người nhận việc trong tháng**'); show(rd['curve'])
-                st.caption(f"Chỉ tính người đã đủ số ngày tính tới {R['cutoff']:%d/%m/%Y}. Người chưa có trong file nghỉ việc được coi là còn làm.")
-                for ttl, key in (('Nghỉ trong 30 ngày theo nguồn', 'by_source'), ('theo chi nhánh/bộ phận', 'by_unit'), ('theo vị trí', 'by_pos'), ('theo HR', 'by_hr')):
-                    st.markdown(f'**{ttl}**'); show(rd[key])
-            with st.expander('Danh sách chi tiết người nhận việc'): show(R['nv_list'].drop(columns=['k']), hide_index=True)
-            with st.expander('Danh sách chi tiết người nghỉ việc'): show(R['nghi_list'].drop(columns=['k']) if len(R['nghi_list']) else R['nghi_list'], hide_index=True)
+                with l: st.markdown('**Phân bố: liên lạc → nhận việc**'); show(lt['dist']); st.bar_chart(lt['dist']['So_nguoi'])
+                with r_: st.markdown('**Theo nguồn**'); show(lt['by_source'])
+                st.markdown('**Theo vị trí (top 15)**'); show(lt['by_pos'])
+            else: st.caption('Không có người nhận việc trong tháng.')
+        with t3:
+            if len(Dp['interv']):
+                show(Dp['interv']); st.caption('Gom các cách viết tên khác nhau của cùng một người (A Pháp / a Pháp / Pháp) – chỉ mang tính tham khảo. "Nhận việc / Pass" tính trên những người đã Pass trong tháng.')
+            else: st.caption('Không có buổi phỏng vấn trong tháng.')
+        with t4:
+            for ttl, key in (('Nguồn × chi nhánh/bộ phận', 'x_src_unit'), ('Nguồn × vị trí', 'x_src_pos')):
+                xm = Dp[key]
+                if xm is None: st.caption('Không có dữ liệu.'); continue
+                st.markdown(f'**{ttl}** (đợt CV của tháng)')
+                sel_ = st.radio('Hiển thị', ['% nhận việc / CV', 'Số CV', 'Số nhận việc'], horizontal=True, key=f'{K}_{key}')
+                if sel_.startswith('%'): st.dataframe(xm['rate'].style.format('{:.1f}%', na_rep='–'), width='stretch')
+                else: show(xm['cv'] if sel_ == 'Số CV' else xm['nv'])
+            st.caption('Ô trống (–) = không có CV. Ô có ít CV cho tỷ lệ dao động mạnh, xem cùng bảng "Số CV".')
+        with t5:
+            sal = Dp['salary']
+            if sal.get('n'):
+                st.markdown(f"Có {sal['n']} / {sal['cv']} CV ghi mức lương đề nghị ({sal['cover']:.1f}%). Trung vị {sal['overall']['median']:.1f} triệu, trung bình {sal['overall']['mean']:.1f} triệu.")
+                show(sal['table']); st.caption('Chỉ những CV có ghi lương mới được tính (thường là đã chốt/đề xuất lương) nên "% nhận việc" ở đây cao hơn mặt bằng chung.')
+            else: st.caption('Không có CV nào ghi mức lương trong tháng.')
+        with t6:
+            rd = Dp['ret']; st.markdown('**Đường cong giữ chân của người nhận việc trong tháng**'); show(rd['curve'])
+            st.caption(f"Chỉ tính người đã đủ số ngày tính tới {R['cutoff']:%d/%m/%Y}. Người chưa có trong file nghỉ việc được coi là còn làm.")
+            for ttl, key in (('Nghỉ trong 30 ngày theo nguồn', 'by_source'), ('theo chi nhánh/bộ phận', 'by_unit'), ('theo vị trí', 'by_pos'), ('theo HR', 'by_hr')):
+                st.markdown(f'**{ttl}**'); show(rd[key])
+        with st.expander('Danh sách chi tiết người nhận việc'): show(R['nv_list'].drop(columns=['k']), hide_index=True)
+        with st.expander('Danh sách chi tiết người nghỉ việc'): show(R['nghi_list'].drop(columns=['k']) if len(R['nghi_list']) else R['nghi_list'], hide_index=True)
 
 
+
+    # ---------------------------------------------------------------- THEO TUẦN
+    def get_ktv(R):
+        key = ('ktv', id(raw), R['start'], R['end'], R['adjusted'])
+        if key not in st.session_state['res']: st.session_state['res'][key] = ktv_tvv(R)
+        return st.session_state['res'][key]
+    with tabs[2]:
+        st.subheader('Theo tuần')
+        st.caption('Tuần tính từ thứ Hai đến Chủ nhật, đánh số theo năm (giống "TUẦN 40" ở file Kế toán). Tuần đầu/cuối có dấu * là tuần bị cắt theo ranh giới tháng. Tổng các tuần luôn bằng số cả tháng. Số liệu tính từ raw (không gồm điều chỉnh khớp báo cáo).')
+        opts = []
+        for R_ in results:
+            m_ = R_['month']; Wk = get_weekly(m_); tt = Wk['table']; st.markdown(f'### {MONTHS[m_]}/{year}')
+            show(tt[['Từ', 'Đến', 'CV', 'PV', 'PASS', 'KHONG_DEN_PV', 'NV', 'KHONG_NV', 'NGHI', 'NGHI_TV', 'NGHI_SOM', '% PV/CV', '% Pass/PV', '% NV/Pass', '% NV/CV', '% Nghỉ/Nhận việc', '% Nghỉ thử việc/Nghỉ']])
+            st.bar_chart(tt.drop(index='CẢ THÁNG')[['CV', 'PV', 'PASS', 'NV', 'NGHI']])
+            with st.expander(f'Theo HR × tuần – {MONTHS[m_]}'):
+                for k_, nm_ in (('CV', 'Số CV'), ('PV', 'Tham gia PV'), ('PASS', 'Đạt PV'), ('NV', 'Nhận việc')): st.markdown(f'**{nm_}**'); show(Wk['hr'][k_])
+            with st.expander(f'Theo nguồn × tuần – {MONTHS[m_]}'):
+                for k_, nm_ in (('CV', 'Số CV'), ('PASS', 'Đạt PV'), ('NV', 'Nhận việc')): st.markdown(f'**{nm_}**'); show(Wk['src'][k_])
+            with st.expander(f'Theo chi nhánh / bộ phận × tuần – {MONTHS[m_]}'):
+                for k_, nm_ in (('CV', 'Số CV'), ('NV', 'Nhận việc'), ('NGHI', 'Nghỉ việc')): st.markdown(f'**{nm_}**'); show(Wk['unit'][k_])
+            with st.expander(f'KTV / TVV theo chi nhánh và thời gian làm việc trước khi nghỉ (cả tháng) – {MONTHS[m_]}'):
+                Kt = get_ktv(R_); show(Kt['cn'])
+                if len(Kt['tenure']): st.markdown('**Thời gian làm việc trước khi nghỉ**'); show(Kt['tenure'])
+                if len(Kt['khac_nv']) or len(Kt['khac_ng']): st.caption('Nhóm "Khác" gồm các vị trí không phải KTV/TVV: ' + ', '.join(f'{k_} ({v_})' for k_, v_ in list(Kt['khac_nv'].items())[:8] + list(Kt['khac_ng'].items())[:8]))
+            opts += [(m_, w_) for w_ in Wk['weeks']]
+        st.markdown('---'); st.subheader('Xem chi tiết một tuần')
+        labels_ = [f"{MONTHS[m_]} – {w_['label']}" for m_, w_ in opts]
+        pick_ = st.selectbox('Chọn tuần', labels_, key='wk_pick')
+        m_, w_ = opts[labels_.index(pick_)]
+        render_period(get_period(w_['start'], w_['end'], f"{w_['label']} – {MONTHS[m_]}/{year}", m_), f"w{m_}_{w_['no']}")
+
+    # ---------------------------------------------------------------- KIỂM TRA DỮ LIỆU
+    with tabs[3]:
+        st.subheader('Kiểm tra dữ liệu giữa DATA – Kế toán – Master')
+        st.caption('App ghép người giữa các file theo họ tên + ngày nhận việc/nghỉ. Nếu ai đó nhập sai tên thì người đó bị coi là "chưa nhập" ở file kia, hoặc bị đếm thành 2 người (khi nghỉ việc). Sheet này liệt kê các trường hợp nghi sai tên (tên giống nhau từ 85%, cùng ngày nhận việc), người chưa nhập, ngày/chi nhánh lệch và ngày vô lý để bạn sửa trong file gốc. App KHÔNG tự sửa hay tự gộp tên.')
+        frames = []
+        for R_ in results:
+            c_ = get_checks(R_).copy(); c_.insert(0, 'Tháng', f"T{R_['month']:02d}"); frames.append(c_)
+        allc = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if not len(allc): st.success('Không phát hiện vấn đề nào trong các tháng đã chọn.')
+        else:
+            q = st.columns(4); q[0].metric('Tổng số vấn đề', len(allc)); [q[i + 1].metric(sv_, int((allc['Mức độ'] == sv_).sum())) for i, sv_ in enumerate(['Cao', 'Trung bình', 'Thấp'])]
+            f1, f2, f3 = st.columns(3)
+            sev_ = f1.multiselect('Mức độ', ['Cao', 'Trung bình', 'Thấp'], default=['Cao', 'Trung bình', 'Thấp'], key='chk_sev')
+            typ_ = f2.multiselect('Loại vấn đề', sorted(allc['Loại'].unique()), default=[], key='chk_type', help='Để trống = tất cả')
+            nm_q = f3.text_input('Tìm theo họ tên', key='chk_name')
+            v_ = allc[allc['Mức độ'].isin(sev_)]
+            if typ_: v_ = v_[v_['Loại'].isin(typ_)]
+            if nm_q.strip(): v_ = v_[v_['Họ tên'].astype(str).map(norm).str.contains(norm(nm_q), regex=False)]
+            st.markdown('**Tổng hợp theo loại**'); show(allc.groupby(['Mức độ', 'Loại']).size().rename('Số lượng').reset_index().assign(_o=lambda x: x['Mức độ'].map(SEV_ORDER)).sort_values(['_o', 'Số lượng'], ascending=[True, False]).drop(columns='_o'), hide_index=True)
+            st.markdown(f'**Chi tiết ({len(v_)} dòng)**'); st.dataframe(v_, width='stretch', hide_index=True, column_config={'Chi tiết': st.column_config.TextColumn(width='large'), 'Gợi ý xử lý': st.column_config.TextColumn(width='medium')})
+            st.caption('Cột "Dòng" là số dòng trong sheet của file gốc để bạn mở đúng chỗ sửa. Mức độ Cao = ảnh hưởng tới số liệu (đếm trùng/thiếu); Trung bình = lệch giữa các file; Thấp = nhập liệu chưa chuẩn.')
+
+    # ---------------------------------------------------------------- KHOẢNG NGÀY TÙY CHỌN
+    Rr = None
+    if rng:
+        with tabs[4]:
+            Rr = get_period(rng[0], rng[1], f"Từ {rng[0]:%d/%m/%Y} đến {rng[1]:%d/%m/%Y}", rng[1].month)
+            st.caption('Khoảng ngày tùy chọn (như dashboard theo dõi): mỗi chỉ tiêu tính theo ngày của chính bước đó trong khoảng đã chọn. Số liệu từ raw, không gồm điều chỉnh khớp báo cáo.')
+            render_period(Rr, 'rng')
+
+    for tab, R in zip(tabs[NF:], results):
+        with tab: render_period(R, f"m{R['month']}")
     # ---- xuất Excel (đặt ở thanh bên; dựng lại khi lựa chọn thay đổi)
     deeps = {R['month']: get_deep(R) for R in results}
-    sig = repr((id(raw), year, tuple(sel), use_adj, tuple((m_, tuple(sorted(manual[m_].items()))) for m_ in sel), tuple((m_, tuple(map(tuple, bt_store[m_].fillna(-1).round(4).values.tolist()))) for m_ in sorted(bt_store))))
+    wk_x = {R['month']: dict(week=get_weekly(R['month']), ktv=get_ktv(R)) for R in results}; ck_x = {R['month']: get_checks(R) for R in results}; cu_x = (Rr, get_deep(Rr)) if Rr is not None else None
+    sig = repr((id(raw), year, tuple(sel), use_adj, rng, tuple((m_, tuple(sorted(manual[m_].items()))) for m_ in sel), tuple((m_, tuple(map(tuple, bt_store[m_].fillna(-1).round(4).values.tolist()))) for m_ in sorted(bt_store))))
     if st.session_state.get('xl_sig') != sig:
-        st.session_state['xl_bytes'] = export_excel(results, deeps, bt_store, get_trend(), dict(files=names)); st.session_state['xl_sig'] = sig
+        st.session_state['xl_bytes'] = export_excel(results, deeps, bt_store, get_trend(), dict(files=names), weekly=wk_x, checks=ck_x, custom=cu_x); st.session_state['xl_sig'] = sig
     xl_slot.download_button('⬇️ Tải báo cáo Excel (đầy đủ)', st.session_state['xl_bytes'], file_name='Bao_cao_tuyen_dung_' + '_'.join(f'T{m_:02d}' for m_ in sel) + f'_{year}.xlsx', key='dl_all',
                             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
